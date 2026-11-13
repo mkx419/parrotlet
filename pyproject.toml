@@ -1,0 +1,49 @@
+[build-system]
+requires = ["uv_build>=0.13.1,<0.14.0"]
+build-backend = "uv_build"
+
+[project]
+name = "parrotlet"
+version = "0.1.0"
+description = "A typed, immutable SQL query builder for DuckDB"
+readme = "README.md"
+authors = [{ name = "mkx419", email = "mkx419@gmail.com" }]
+requires-python = ">=3.14"
+dependencies = ["duckdb>=2.0.0", "shapely>=2.2.0"]
+
+[tool.ruff]
+fix = true
+line-length = 120
+
+[tool.ruff.lint]
+select = [
+    "ANN", # flake8-annotations
+    "B",   # flake8-bugbear
+    "B9",
+    "A",   # flake8-builtins
+    "COM", # flake8-commas
+    "C4",  # flake8-comprehensions
+    "FA",  # flake8-future-annotations
+    "PIE", # flake8-pie
+    "PYI", # flake8-pyi
+    "SIM", # flake8-simplify
+    "I",   # isort
+    "E",   # pycodestyle (error)
+    "W",   # pycodestyle (warning)
+    "F",   # pyflakes
+    "RUF", # Ruff-specific rules
+]
+
+[tool.ruff.lint.pydocstyle]
+convention = "numpy"
+
+[tool.uv]
+python-preference = "managed"
+
+[dependency-groups]
+dev = ["pytest>=9.2.0"]
+docs = ["mkdocstrings[python]>=1.0.8", "ruff>=0.17.5", "zensical>=0.1.1"]
+
+[tool.pyright]
+pythonVersion = "3.14"
+reportUnnecessaryTypeIgnoreComment = "error"

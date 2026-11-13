@@ -1,0 +1,50 @@
+# 式
+
+::: parrotlet.expr
+    options:
+      show_root_heading: false
+      members:
+        - Expr
+        - ColumnRef
+        - Param
+        - Lit
+        - Func
+        - AggregateFunc
+        - WindowFunc
+        - Case
+        - SearchedCase
+        - SimpleCase
+        - Star
+        - ColumnsExpr
+        - Lambda
+        - ListComprehension
+        - Quantified
+        - Window
+        - Frame
+        - Aliased
+        - OrderItem
+        - col
+        - val
+        - lit
+        - sql
+        - keyword
+        - star
+        - columns
+        - case
+        - cast
+        - try_cast
+        - try_
+        - and_
+        - or_
+        - not_
+        - exists
+        - not_exists
+        - any_
+        - all_
+        - positional
+        - list_comprehension
+        - window
+        - rows_between
+        - range_between
+        - groups_between
+        - func

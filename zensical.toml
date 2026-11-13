@@ -1,0 +1,118 @@
+[project]
+site_name = "parrotlet"
+site_description = "DuckDB 用の型安全な SQL クエリビルダー"
+repo_name = "parrotlet"
+
+nav = [
+  { "ホーム" = "index.md" },
+  { "ガイド" = [
+    { "はじめに" = "guide/getting-started.md" },
+    { "Database" = "guide/database.md" },
+    { "モデル" = "guide/models.md" },
+    { "型安全" = "guide/typing.md" },
+    { "式" = "guide/expressions.md" },
+    { "SELECT" = "guide/select.md" },
+    { "INSERT / UPDATE / DELETE / MERGE" = "guide/dml.md" },
+    { "DDL" = "guide/ddl.md" },
+    { "関数" = "guide/functions.md" },
+    { "DuckDB 固有の機能" = "guide/duckdb.md" },
+    { "GEOMETRY（shapely）" = "guide/geometry.md" },
+    { "結果の変換" = "guide/results.md" },
+    { "開発" = "guide/development.md" },
+  ] },
+  { "API リファレンス" = [
+    "reference/index.md",
+    { "parrotlet" = "reference/parrotlet.md" },
+    { "Database" = "reference/database.md" },
+    { "モデル" = "reference/model.md" },
+    { "式" = "reference/expr.md" },
+    { "FROM ソース" = "reference/source.md" },
+    { "ステートメント" = "reference/statement.md" },
+    { "データ型" = "reference/datatype.md" },
+    { "SQL 型" = "reference/sqltypes.md" },
+    { "Query / Node" = "reference/query.md" },
+    { "結果の変換" = "reference/result.md" },
+    { "関数（core）" = "reference/functions.md" },
+    { "関数（spatial）" = "reference/spatial.md" },
+    { "テーブル関数" = "reference/tables.md" },
+  ] },
+]
+
+[project.theme]
+language = "ja"
+features = [
+  "content.code.annotate",
+  "content.code.copy",
+  "content.code.select",
+  "content.tooltips",
+  "navigation.footer",
+  "navigation.indexes",
+  "navigation.instant",
+  "navigation.instant.prefetch",
+  "navigation.path",
+  "navigation.sections",
+  "navigation.tabs",
+  "navigation.top",
+  "navigation.tracking",
+  "search.highlight",
+  "toc.follow",
+]
+
+[[project.theme.palette]]
+media = "(prefers-color-scheme)"
+toggle.icon = "lucide/sun-moon"
+toggle.name = "ライトモードに切り替え"
+
+[[project.theme.palette]]
+media = "(prefers-color-scheme: light)"
+scheme = "default"
+primary = "teal"
+accent = "amber"
+toggle.icon = "lucide/sun"
+toggle.name = "ダークモードに切り替え"
+
+[[project.theme.palette]]
+media = "(prefers-color-scheme: dark)"
+scheme = "slate"
+primary = "teal"
+accent = "amber"
+toggle.icon = "lucide/moon"
+toggle.name = "システム設定に従う"
+
+[project.markdown_extensions]
+admonition = {}
+attr_list = {}
+def_list = {}
+md_in_html = {}
+tables = {}
+toc.permalink = true
+pymdownx.details = {}
+pymdownx.highlight.anchor_linenums = true
+pymdownx.highlight.line_spans = "__span"
+pymdownx.highlight.pygments_lang_class = true
+pymdownx.inlinehilite = {}
+pymdownx.superfences = {}
+pymdownx.tabbed.alternate_style = true
+pymdownx.tabbed.combine_header_slug = true
+
+[project.plugins.mkdocstrings.handlers.python]
+paths = ["src"]
+inventories = ["https://docs.python.org/3/objects.inv"]
+
+[project.plugins.mkdocstrings.handlers.python.options]
+docstring_style = "numpy"
+docstring_section_style = "list"
+show_source = false
+show_root_heading = true
+show_root_full_path = false
+show_symbol_type_heading = true
+show_symbol_type_toc = true
+show_signature_annotations = true
+separate_signature = true
+signature_crossrefs = true
+merge_init_into_class = true
+members_order = "source"
+filters = ["!^_"]
+heading_level = 2
+show_if_no_docstring = false
+show_overloads = true
