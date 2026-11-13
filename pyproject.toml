@@ -32,6 +32,7 @@ select = [
     "W",   # pycodestyle (warning)
     "F",   # pyflakes
     "RUF", # Ruff-specific rules
+    "N",   # pep8-naming
 ]
 
 [tool.ruff.lint.pydocstyle]
@@ -47,3 +48,6 @@ docs = ["mkdocstrings[python]>=1.0.8", "ruff>=0.17.5", "zensical>=0.1.1"]
 [tool.pyright]
 pythonVersion = "3.14"
 reportUnnecessaryTypeIgnoreComment = "error"
+
+[tool.ty.rules]
+unused-ignore-comment = "error"

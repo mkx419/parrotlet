@@ -5,15 +5,29 @@ from __future__ import annotations
 from abc import abstractmethod
 from collections.abc import Sequence
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Any, Literal, overload, override
+from typing import TYPE_CHECKING, Any, Literal, Unpack, overload, override
 
-from parrotlet.expr import Aliased, ColumnRef, Expr, PyScalar, Star, make_star, to_expr
-from parrotlet.query import Node, Query, concat, join, qualified, quote_ident, render_literal
+from parrotlet.expr import Aliased, ColumnRef, Expr, PyScalar, Star, StarModifiers, make_star, to_expr
+from parrotlet.query import (
+    Node,
+    PathLike,
+    Query,
+    concat,
+    ident_list,
+    join,
+    path_str,
+    qualified,
+    quote_ident,
+    render_literal,
+)
 
 if TYPE_CHECKING:
     from parrotlet.model import Model
 
 type SampleMethod = Literal["reservoir", "bernoulli", "system"]
+
+
+# region Source base class
 
 
 def _alias_sql(alias: str | None, columns: tuple[str, ...]) -> str:
@@ -22,7 +36,7 @@ def _alias_sql(alias: str | None, columns: tuple[str, ...]) -> str:
         if columns:
             raise ValueError("Column aliases need a table alias")
         return ""
-    cols = "(" + ", ".join(quote_ident(c) for c in columns) + ")" if columns else ""
+    cols = ident_list(columns) if columns else ""
     return f" AS {quote_ident(alias)}{cols}"
 
 
@@ -61,32 +75,9 @@ class Source(Node):
     def __getitem__(self, name: str) -> ColumnRef[Any]:
         return self.col(name)
 
-    def star(
-        self,
-        *,
-        exclude: Sequence[str] = (),
-        replace: dict[str, Expr[Any] | PyScalar] | None = None,
-        rename: dict[str, str] | None = None,
-        like: str | None = None,
-        not_like: str | None = None,
-        ilike: str | None = None,
-        not_ilike: str | None = None,
-        glob: str | None = None,
-        similar_to: str | None = None,
-    ) -> Star:
+    def star(self, **modifiers: Unpack[StarModifiers]) -> Star:
         """`t.*` with the same modifiers as `parrotlet.star()`."""
-        return make_star(
-            self.qualifier(),
-            exclude=exclude,
-            replace=replace,
-            rename=rename,
-            like=like,
-            not_like=not_like,
-            ilike=ilike,
-            not_ilike=not_ilike,
-            glob=glob,
-            similar_to=similar_to,
-        )
+        return make_star(self.qualifier(), **modifiers)
 
     def tablesample(
         self,
@@ -98,6 +89,12 @@ class Source(Node):
     ) -> SampledSource:
         """`... TABLESAMPLE 10 PERCENT` / `TABLESAMPLE reservoir(100 ROWS) REPEATABLE (seed)`."""
         return SampledSource(self, Sample.of(percent, rows, method, seed, kind="TABLESAMPLE"))
+
+
+# endregion
+
+
+# region Sampling
 
 
 @dataclass(frozen=True, slots=True, eq=False)
@@ -151,6 +148,12 @@ class SampledSource(Source):
     @override
     def build(self) -> Query:
         return concat(self.source, self.sample)
+
+
+# endregion
+
+
+# region FROM sources
 
 
 @dataclass(frozen=True, slots=True, eq=False)
@@ -223,9 +226,9 @@ class CTE(Source):
     def definition(self) -> Query:
         head = quote_ident(self.name)
         if self.columns:
-            head += " (" + ", ".join(quote_ident(c) for c in self.columns) + ")"
+            head += " " + ident_list(self.columns)
         if self.using_key:
-            head += " USING KEY (" + ", ".join(quote_ident(c) for c in self.using_key) + ")"
+            head += " USING KEY " + ident_list(self.using_key)
         mat = {None: "", True: " MATERIALIZED", False: " NOT MATERIALIZED"}[self.materialized]
         return concat(Query(f"{head} AS{mat} ("), self.query, ")")
 
@@ -302,6 +305,12 @@ class FileSource(Source):
         return Query(render_literal(self.path) + _alias_sql(self.alias, self.columns))
 
 
+# endregion
+
+
+# region Constructors
+
+
 @overload
 def table(name: str, *, schema: str | None = None, catalog: str | None = None, alias: str | None = None) -> Table: ...
 @overload
@@ -346,9 +355,15 @@ def values(
     return ValuesSource(tuple(tuple(to_expr(v) for v in r) for r in rows), alias, tuple(columns))
 
 
-def file(path: str, alias: str | None = None, columns: Sequence[str] = ()) -> FileSource:
-    """Read a file (or glob) directly: `select().from_(file("data/*.parquet"))`."""
-    return FileSource(path, alias, tuple(columns))
+def file(path: PathLike, alias: str | None = None, columns: Sequence[str] = ()) -> FileSource:
+    """Read a file (or glob) directly: `select().from_(file("data/*.parquet"))`; `path` may be a `pathlib.Path`."""
+    return FileSource(path_str(path), alias, tuple(columns))
+
+
+# endregion
+
+
+# region Coercion
 
 
 type FromItem = Source | Aliased | Expr[Any]
@@ -409,3 +424,6 @@ def to_table(value: TableLike) -> Table:
     if table is None:
         raise TypeError(f"Cannot use {value!r} as a table")
     return table
+
+
+# endregion

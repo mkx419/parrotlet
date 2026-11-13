@@ -1,6 +1,22 @@
 # 結果の変換
 
-`fetch(into)` は結果の各行を変換します。カラム名とフィールド名で対応付けます。
+## 結果を受け取るメソッド
+
+| メソッド | 戻り値 | 用途 |
+|---|---|---|
+| `.fetchall()` | `list[tuple]` | 手早く全行を取る |
+| `.fetchone()` | <code>tuple &#124; None</code> | 1行だけ取る |
+| `.fetch_as(into)` | `list[into]` | 型付きのオブジェクトで受け取る |
+| `.fetch_one_as(into)` | <code>into &#124; None</code> | 1行だけ型付きで受け取る |
+| `.df()` | pandas の DataFrame | 分析（pandas が必要） |
+| `.pl()` | polars の DataFrame | 分析（polars が必要） |
+| `.execute()` | DuckDB のカーソル | DuckDB の API を直接使う（`.arrow()`、`.fetchmany()` など） |
+
+`fetchall()` と `fetchone()` は、DuckDB と同じくタプルを返します。指定した型のオブジェクトで受け取るときは、名前が `_as` で終わる `fetch_as()` と `fetch_one_as()` を使います。
+
+## fetch_as：型付きのオブジェクトにする
+
+`fetch_as(into)` は、各行を `into` 型のオブジェクトに変換します。カラム名とフィールド名で対応付けます。
 
 ```python
 from dataclasses import dataclass
@@ -8,9 +24,9 @@ from typing import NamedTuple, TypedDict
 
 
 @dataclass
-class Total:
+class Row:
     name: str
-    total: Decimal
+    age: int | None
 
 
 class Pair(NamedTuple):
@@ -18,19 +34,77 @@ class Pair(NamedTuple):
     n: int
 
 
-q.fetch(Total)  # list[Total]
-q.fetch_one(Total)  # Total | None
-select(User).from_(User).fetch(User)  # モデルのインスタンス
-insert(User).values(...).returning(User.id, User.name).fetch(UserRow)
+class NameOnly(TypedDict):
+    name: str
+
+
+db.select(User.name, User.age).from_(User).fetch_as(Row)
+# [Row(name='alice', age=30), Row(name='bob', age=None)]
+
+q = db.select(User.country, fn.count().as_("n")).from_(User).group_by(User.country)
+q.fetch_as(Pair)
+# [Pair(country='JP', n=1), Pair(country=None, n=1)]
+
+db.select(User.name).from_(User).fetch_as(NameOnly)
+# [{'name': 'alice'}, {'name': 'bob'}]
+
+db.from_(User).fetch_as(User)  # モデルのインスタンス
+db.from_(User).where(User.id == 99).fetch_one_as(User)  # None
 ```
+
+型チェッカーは、`fetch_as(Row)` の戻り値を `list[Row]` と推論します。
+
+### 変換先と対応付け
 
 | 変換先 | 対応付け |
 |---|---|
-| モデル（`Model` のサブクラス） | SQL のカラム名とモデルのカラムを対応付け、`name=` で付けた別名も考慮する |
-| データクラス・NamedTuple・TypedDict・型注釈付きのクラス | 型注釈のフィールド名とカラム名で対応付け、`into(**row)` で生成する（pydantic の `BaseModel` も可） |
+| モデル（`Model` のサブクラス） | SQL のカラム名とモデルのカラムを対応付ける（`column(name=...)` の名前も考慮）。結果にないカラムは `None` になる |
+| データクラス・NamedTuple・TypedDict・型注釈付きのクラス | 型注釈のフィールド名とカラム名で対応付け、`into(**row)` で作る（pydantic の `BaseModel` なども使える） |
 
-- **ジオメトリの変換**：フィールドが shapely のジオメトリ型（`BaseGeometry`、`Point | None` など）の場合は、WKB を自動で shapely のオブジェクトに変換します。
-- **対応するフィールドがないカラム**：エラーになります。`.as_("name")` で名前を合わせてください。
-- **RETURNING のない DML**：INSERT / UPDATE / DELETE に `fetch` を使うとエラーになります。`.returning(...)` を付けてください。
+- **フィールドにないカラム**：`ValueError` になります。式には `.as_("name")` で別名を付けて、フィールド名と合わせてください。
 
-そのほか、`.fetchall()`、`.fetchone()`、`.df()`（pandas）、`.pl()`（polars）、`.execute()`（DuckDB のカーソル）も使えます。
+    ```python
+    db.select(User.name, fn.upper(User.name)).from_(User).fetch_as(Row)
+    # ValueError: Columns ['upper(users."name")'] have no matching field on Row;
+    #   alias them with .as_()
+    ```
+
+- **結果にないフィールド**：データクラスでは、既定値のないフィールドが足りないと `TypeError` になります。
+- **ジオメトリ**：フィールドが shapely のジオメトリ型なら、WKB を shapely のオブジェクトに変換します。
+- **値の変換**：それ以外の値は DuckDB が返した Python の値のまま渡されます（型注釈に合わせた変換はしません）。
+
+### INSERT / UPDATE / DELETE の結果
+
+データを変更する文から結果を受け取るには、`.returning(...)` を付けます。
+
+```python
+ins = db.insert(User).values(User(id=6, name="f", age=20))
+ins.returning(User.name, User.age).fetch_as(Row)
+# [Row(name='f', age=20)]
+
+upd = db.update(User).set(age=User.age + 1).where(User.id == 1)
+upd.returning(User.age).fetchall()
+# [(31,)]
+```
+
+`.returning()` のない文に `fetch_as()` を使うと、実行する前に `ValueError` になります。
+
+## DataFrame
+
+```python
+# pandas
+db.select(User.country, fn.count().as_("n")).from_(User).group_by_all().df()
+
+db.from_(User).pl()  # polars
+db.from_(User).execute().arrow()  # pyarrow（DuckDB のカーソルのメソッド）
+```
+
+## 大きな結果
+
+`fetchall()` や `fetch_as()` は全行をメモリに読み込みます。大きな結果を少しずつ処理するときは、`.execute()` で DuckDB のカーソルを取り、`fetchmany()` を使ってください。
+
+```python
+cursor = db.from_(Order).execute()
+while rows := cursor.fetchmany(10_000):
+    process(rows)
+```

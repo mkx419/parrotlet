@@ -2,16 +2,26 @@ from __future__ import annotations
 
 from collections.abc import Sequence
 from dataclasses import dataclass, replace
-from typing import TYPE_CHECKING, Any, Literal, Self, cast, override
+from typing import TYPE_CHECKING, Any, Literal, Self, override
 
-from parrotlet import sqltypes as t
+from parrotlet import type as t
 from parrotlet.expr import Bool, Expr, Fragment, NullsOrder, Window, to_column, to_column_expr, to_expr
-from parrotlet.query import Node, Query, concat, join, quote_ident
-from parrotlet.source import CTE, Sample, SubqueryRef, to_from_item
-from parrotlet.statement.base import ColumnInput, FromInput, Statement, and_where, to_columns, with_clause
+from parrotlet.query import Node, Query, concat, ident_list, join, quote_ident
+from parrotlet.source import CTE, Sample, SampleMethod, SubqueryRef, to_from_item
+from parrotlet.statement.base import (
+    BoundStatement,
+    ColumnInput,
+    Filterable,
+    FromInput,
+    and_where,
+    clause,
+    list_clause,
+    to_columns,
+    with_clause,
+)
 
 if TYPE_CHECKING:
-    from parrotlet.database import Database
+    pass
 
 type JoinKind = Literal["INNER", "LEFT", "RIGHT", "FULL", "CROSS", "SEMI", "ANTI", "POSITIONAL", "ASOF", "ASOF LEFT"]
 type SetOp = Literal[
@@ -24,11 +34,11 @@ type SetOp = Literal[
     "EXCEPT",
     "EXCEPT ALL",
 ]
+type Using = Sequence[str] | str | None
+"""`USING (...)` columns of a join: one name or several."""
 
 
-# --------------------------------------------------------------------------------------------------------------------
-# Clause nodes
-# --------------------------------------------------------------------------------------------------------------------
+# region Clause nodes
 
 
 @dataclass(frozen=True, slots=True, eq=False)
@@ -45,7 +55,7 @@ class Join(Node):
         if self.on is not None:
             tail: Query | None = concat(" ON ", self.on)
         elif self.using:
-            tail = Query(" USING (" + ", ".join(quote_ident(c) for c in self.using) + ")")
+            tail = Query(" USING " + ident_list(self.using))
         else:
             tail = None
         return concat(" ", Query(head), self.target, tail)
@@ -79,34 +89,34 @@ def grouping_sets(*sets: Sequence[ColumnInput]) -> Grouping:
     return Grouping("GROUPING SETS", tuple(tuple(to_column(c) for c in s) for s in sets))
 
 
-# --------------------------------------------------------------------------------------------------------------------
-# Shared behaviour for SELECT and compound (UNION ...) queries
-# --------------------------------------------------------------------------------------------------------------------
+# endregion
 
 
-class QueryStatement(Statement):
-    """Methods shared by `Select` and `Compound`. Subclasses provide the fields used here."""
+# region Shared behaviour for SELECT, compound (UNION ...) and PIVOT queries
 
-    __slots__ = ()
-    _ctes: tuple[CTE, ...]
-    _recursive: bool
-    _order_by: tuple[Node, ...] | Literal["ALL"]
-    _order_all: tuple[bool, NullsOrder | None]
-    _limit: Expr[Any] | None
-    _limit_percent: bool
-    _offset: Expr[Any] | None
 
-    def _replace(self, **changes: object) -> Self:
-        return replace(cast("Any", self), **changes)
+@dataclass(frozen=True, slots=True, eq=False, kw_only=True)
+class QueryStatement(BoundStatement):
+    """Fields and methods shared by `Select`, `Compound`, `Pivot` and `Unpivot`."""
 
-    # WITH ---------------------------------------------------------------------------------------------------------
+    _ctes: tuple[CTE, ...] = ()
+    _recursive: bool = False
+    _order_by: tuple[Node, ...] | Literal["ALL"] = ()
+    _order_all: tuple[bool, NullsOrder | None] = (False, None)
+    _limit: Expr[Any] | None = None
+    _limit_percent: bool = False
+    _offset: Expr[Any] | None = None
+
+    # region WITH
     def with_(self, *ctes: CTE) -> Self:
         return self._replace(_ctes=(*self._ctes, *ctes))
 
     def with_recursive(self, *ctes: CTE) -> Self:
         return self._replace(_ctes=(*self._ctes, *ctes), _recursive=True)
 
-    # ORDER BY / LIMIT ---------------------------------------------------------------------------------------------
+    # endregion
+
+    # region ORDER BY / LIMIT
     def order_by(self, *items: ColumnInput) -> Self:
         current = () if self._order_by == "ALL" else self._order_by
         return self._replace(_order_by=(*current, *to_columns(items)))
@@ -128,7 +138,9 @@ class QueryStatement(Statement):
     def offset(self, n: Expr[t.BigInt] | int) -> Self:
         return self._replace(_offset=to_expr(n))
 
-    # set operations -----------------------------------------------------------------------------------------------
+    # endregion
+
+    # region set operations
     def union(self, other: QueryStatement, *, all: bool = False, by_name: bool = False) -> Compound:  # noqa: A002
         op = "UNION" + (" ALL" if all else "") + (" BY NAME" if by_name else "")
         return Compound.of(self, op, other)
@@ -142,7 +154,9 @@ class QueryStatement(Statement):
     def except_(self, other: QueryStatement, *, all: bool = False) -> Compound:  # noqa: A002
         return Compound.of(self, "EXCEPT ALL" if all else "EXCEPT", other)
 
-    # wrapping -----------------------------------------------------------------------------------------------------
+    # endregion
+
+    # region wrapping
     def subquery(self, alias: str, *, lateral: bool = False, columns: Sequence[str] = ()) -> SubqueryRef:
         """Use this query as a FROM / JOIN source (`columns` renames its output columns: `AS alias(c1, c2)`)."""
         return SubqueryRef(self, alias, lateral, tuple(columns))
@@ -165,7 +179,14 @@ class QueryStatement(Statement):
         """Use this query as a scalar subquery expression."""
         return to_expr(self)
 
-    # rendering ----------------------------------------------------------------------------------------------------
+    # endregion
+
+    # region rendering
+    def _has_tail(self) -> bool:
+        """True if ORDER BY / LIMIT / OFFSET is set. (`_limit` / `_offset` are expressions, which have no truth value,
+        so they are compared with None.)"""
+        return bool(self._order_by) or self._limit is not None or self._offset is not None
+
     def _tail(self) -> Query:
         order: Query | None
         if self._order_by == "ALL":
@@ -173,24 +194,25 @@ class QueryStatement(Statement):
             order = Query(
                 " ORDER BY ALL" + (" DESC" if desc else " ASC") + (f" NULLS {nulls.upper()}" if nulls else ""),
             )
-        elif self._order_by:
-            order = concat(" ORDER BY ", join(", ", self._order_by))
         else:
-            order = None
+            order = list_clause("ORDER BY", self._order_by)
         return concat(
             order,
             concat(" LIMIT ", self._limit, "%" if self._limit_percent else None) if self._limit is not None else None,
-            concat(" OFFSET ", self._offset) if self._offset is not None else None,
+            clause("OFFSET", self._offset),
         )
 
+    # endregion
 
-# --------------------------------------------------------------------------------------------------------------------
-# SELECT
-# --------------------------------------------------------------------------------------------------------------------
+
+# endregion
+
+
+# region SELECT
 
 
 @dataclass(frozen=True, slots=True, eq=False)
-class Select(QueryStatement):
+class Select(QueryStatement, Filterable):
     _columns: tuple[Node, ...] = ()
     _distinct: bool = False
     _distinct_on: tuple[Expr[Any], ...] = ()
@@ -202,16 +224,8 @@ class Select(QueryStatement):
     _windows: tuple[tuple[str, Window], ...] = ()
     _qualify: Bool | None = None
     _sample: Sample | None = None
-    _ctes: tuple[CTE, ...] = ()
-    _recursive: bool = False
-    _order_by: tuple[Node, ...] | Literal["ALL"] = ()
-    _order_all: tuple[bool, NullsOrder | None] = (False, None)
-    _limit: Expr[Any] | None = None
-    _limit_percent: bool = False
-    _offset: Expr[Any] | None = None
-    _db: Database | None = None
 
-    # SELECT list --------------------------------------------------------------------------------------------------
+    # region SELECT list
     def select(self, *columns: ColumnInput) -> Select:
         """Append columns to the select list."""
         return replace(self, _columns=(*self._columns, *to_columns(columns)))
@@ -223,7 +237,9 @@ class Select(QueryStatement):
         items = on if isinstance(on, (list, tuple)) else (on,)
         return replace(self, _distinct=True, _distinct_on=tuple(to_column_expr(o) for o in items))
 
-    # FROM / JOIN --------------------------------------------------------------------------------------------------
+    # endregion
+
+    # region FROM / JOIN
     def from_(self, *items: FromInput) -> Select:
         """Tables (`str` = table name), `table(...)`, `.subquery(alias)`, CTEs, or table-function calls."""
         return replace(self, _from=(*self._from, *(to_from_item(i) for i in items)))
@@ -233,7 +249,7 @@ class Select(QueryStatement):
         kind: JoinKind,
         target: FromInput,
         on: Bool | None,
-        using: Sequence[str] | str | None,
+        using: Using,
         *,
         natural: bool = False,
     ) -> Select:
@@ -242,34 +258,16 @@ class Select(QueryStatement):
             raise ValueError("Specify either on= or using=, not both")
         return replace(self, _joins=(*self._joins, Join(kind, to_from_item(target), on, using_t, natural)))
 
-    def join(self, target: FromInput, on: Bool | None = None, *, using: Sequence[str] | str | None = None) -> Select:
+    def join(self, target: FromInput, on: Bool | None = None, *, using: Using = None) -> Select:
         return self._join("INNER", target, on, using)
 
-    def left_join(
-        self,
-        target: FromInput,
-        on: Bool | None = None,
-        *,
-        using: Sequence[str] | str | None = None,
-    ) -> Select:
+    def left_join(self, target: FromInput, on: Bool | None = None, *, using: Using = None) -> Select:
         return self._join("LEFT", target, on, using)
 
-    def right_join(
-        self,
-        target: FromInput,
-        on: Bool | None = None,
-        *,
-        using: Sequence[str] | str | None = None,
-    ) -> Select:
+    def right_join(self, target: FromInput, on: Bool | None = None, *, using: Using = None) -> Select:
         return self._join("RIGHT", target, on, using)
 
-    def full_join(
-        self,
-        target: FromInput,
-        on: Bool | None = None,
-        *,
-        using: Sequence[str] | str | None = None,
-    ) -> Select:
+    def full_join(self, target: FromInput, on: Bool | None = None, *, using: Using = None) -> Select:
         return self._join("FULL", target, on, using)
 
     def cross_join(self, target: FromInput) -> Select:
@@ -278,22 +276,10 @@ class Select(QueryStatement):
     def natural_join(self, target: FromInput) -> Select:
         return self._join("INNER", target, None, None, natural=True)
 
-    def semi_join(
-        self,
-        target: FromInput,
-        on: Bool | None = None,
-        *,
-        using: Sequence[str] | str | None = None,
-    ) -> Select:
+    def semi_join(self, target: FromInput, on: Bool | None = None, *, using: Using = None) -> Select:
         return self._join("SEMI", target, on, using)
 
-    def anti_join(
-        self,
-        target: FromInput,
-        on: Bool | None = None,
-        *,
-        using: Sequence[str] | str | None = None,
-    ) -> Select:
+    def anti_join(self, target: FromInput, on: Bool | None = None, *, using: Using = None) -> Select:
         return self._join("ANTI", target, on, using)
 
     def asof_join(self, target: FromInput, on: Bool, *, left: bool = False) -> Select:
@@ -303,11 +289,9 @@ class Select(QueryStatement):
     def positional_join(self, target: FromInput) -> Select:
         return self._join("POSITIONAL", target, None, None)
 
-    # filtering / grouping -----------------------------------------------------------------------------------------
-    def where(self, *conditions: Bool) -> Select:
-        """Add conditions; multiple calls/arguments are combined with AND."""
-        return replace(self, _where=and_where(self._where, conditions))
+    # endregion
 
+    # region filtering / grouping
     def group_by(self, *items: ColumnInput) -> Select:
         current = () if self._group_by == "ALL" else self._group_by
         return replace(self, _group_by=(*current, *to_columns(items)))
@@ -331,13 +315,15 @@ class Select(QueryStatement):
         *,
         percent: float | None = None,
         rows: int | None = None,
-        method: Literal["reservoir", "bernoulli", "system"] | None = None,
+        method: SampleMethod | None = None,
         seed: int | None = None,
     ) -> Select:
         sample = Sample.of(percent, rows, method, seed, kind="USING SAMPLE")
         return replace(self, _sample=sample)
 
-    # rendering ----------------------------------------------------------------------------------------------------
+    # endregion
+
+    # region rendering
     @override
     def build(self) -> Query:
         if self._distinct_on:
@@ -349,10 +335,8 @@ class Select(QueryStatement):
 
         if self._group_by == "ALL":
             group_by: Query | None = Query(" GROUP BY ALL")
-        elif self._group_by:
-            group_by = concat(" GROUP BY ", join(", ", self._group_by))
         else:
-            group_by = None
+            group_by = list_clause("GROUP BY", self._group_by)
 
         windows = (
             concat(" WINDOW ", join(", ", (concat(Query(quote_ident(n) + " AS ("), w, ")") for n, w in self._windows)))
@@ -365,42 +349,37 @@ class Select(QueryStatement):
             "SELECT ",
             distinct,
             join(", ", self._columns) if self._columns else Query("*"),
-            concat(" FROM ", join(", ", self._from)) if self._from else None,
+            list_clause("FROM", self._from),
             *self._joins,
-            concat(" WHERE ", self._where) if self._where is not None else None,
+            clause("WHERE", self._where),
             group_by,
-            concat(" HAVING ", self._having) if self._having is not None else None,
+            clause("HAVING", self._having),
             windows,
-            concat(" QUALIFY ", self._qualify) if self._qualify is not None else None,
+            clause("QUALIFY", self._qualify),
             self._sample,
             self._tail(),
         )
 
+    # endregion
 
-# --------------------------------------------------------------------------------------------------------------------
-# UNION / INTERSECT / EXCEPT
-# --------------------------------------------------------------------------------------------------------------------
+
+# endregion
+
+
+# region UNION / INTERSECT / EXCEPT
 
 
 @dataclass(frozen=True, slots=True, eq=False)
 class Compound(QueryStatement):
     _first: Node
     _rest: tuple[tuple[SetOp, Node], ...] = ()
-    _ctes: tuple[CTE, ...] = ()
-    _recursive: bool = False
-    _order_by: tuple[Node, ...] | Literal["ALL"] = ()
-    _order_all: tuple[bool, NullsOrder | None] = (False, None)
-    _limit: Expr[Any] | None = None
-    _limit_percent: bool = False
-    _offset: Expr[Any] | None = None
-    _db: Database | None = None
 
     @staticmethod
     def of(left: QueryStatement, op: SetOp, right: QueryStatement) -> Compound:
         # Chain onto an existing compound unless it already has its own ORDER BY / LIMIT / WITH.
-        if isinstance(left, Compound) and not (left._order_by or left._limit or left._offset or left._ctes):
+        if isinstance(left, Compound) and not left._has_tail() and not left._ctes:
             return replace(left, _rest=(*left._rest, (op, right)))
-        return Compound(left, ((op, right),), _db=getattr(left, "_db", None) or getattr(right, "_db", None))
+        return Compound(left, ((op, right),), _db=left._db or right._db)
 
     @override
     def build(self) -> Query:
@@ -408,6 +387,12 @@ class Compound(QueryStatement):
         for op, q in self._rest:
             parts.append(concat(Query(f" {op} ("), q, ")"))
         return concat(with_clause(self._ctes, recursive=self._recursive), *parts, self._tail())
+
+
+# endregion
+
+
+# region Entry points
 
 
 def select(*columns: ColumnInput) -> Select:
@@ -418,3 +403,6 @@ def select(*columns: ColumnInput) -> Select:
 def from_(*items: FromInput) -> Select:
     """DuckDB's FROM-first syntax: `from_("t")` is `SELECT * FROM t`."""
     return Select().from_(*items)
+
+
+# endregion

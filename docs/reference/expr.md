@@ -15,6 +15,8 @@
         - SearchedCase
         - SimpleCase
         - Star
+        - StarModifiers
+        - Windowable
         - ColumnsExpr
         - Lambda
         - ListComprehension

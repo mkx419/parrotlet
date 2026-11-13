@@ -40,6 +40,14 @@
       heading_level: 3
       members: [Merge, merge_into, merge_action]
 
+## ステートメントの共通メソッド
+
+::: parrotlet.statement.base
+    options:
+      show_root_heading: false
+      heading_level: 3
+      members: [BoundStatement, DmlStatement, Filterable]
+
 ## PIVOT / UNPIVOT
 
 ::: parrotlet.statement.pivot

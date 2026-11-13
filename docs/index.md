@@ -4,8 +4,7 @@
 
 ```python
 from parrotlet import Column, Database, Model, column
-from parrotlet import functions as F
-
+import parrotlet.functions as fn
 db = Database()
 
 
@@ -17,20 +16,21 @@ class User(Model, table="users"):
 
 
 db.insert(User).values(User(id=1, name="alice", age=30)).execute()
-db.select(User.name, F.upper(User.name)).from_(User).where(User.age >= 20).fetchall()
+q = db.select(User.name, fn.upper(User.name)).from_(User).where(User.age >= 20)
+q.fetchall()
 # [('alice', 'ALICE')]
 ```
 
 ## 特徴
 
 型安全
-:   式は `Expr[T]` で SQL 型を持ちます。`User.name > 3` や `F.upper(User.age)`、`where(User.name)` は、実行する前に pyright などの型チェッカーがエラーにします。詳しくは[型安全](guide/typing.md)を参照してください。
+:   式は `Expr[T]` で SQL 型を持ちます。`User.name > 3` や `fn.upper(User.age)`、`where(User.name)` は、実行する前に pyright などの型チェッカーがエラーにします。詳しくは[型安全](guide/typing.md)を参照してください。
 
 モデル = テーブル定義 + 行
 :   SQLModel のように、1つのクラスでテーブル定義と dataclass ライクな行型を兼ねます。クラス属性（`User.age`）はクエリ用の型付きカラム、インスタンス属性（`user.age`）は値です。詳しくは[モデル](guide/models.md)を参照してください。
 
 接続を持ち回らない
-:   `db.select(...)` のように `Database` から作ったステートメントは、`.fetchall()` や `.fetch(User)` でそのまま実行できます。`@db.register` を付ければ CREATE TABLE も自動です。詳しくは [Database](guide/database.md) を参照してください。
+:   `db.select(...)` のように `Database` から作ったステートメントは、`.fetchall()` や `.fetch_as(User)` でそのまま実行できます。`@db.register` を付けると、CREATE TABLE も自動で実行されます。詳しくは [Database](guide/database.md) を参照してください。
 
 DuckDB の機能を網羅
 :   PIVOT / UNPIVOT、MERGE、QUALIFY、`COLUMNS(...)`、`* EXCLUDE / REPLACE / RENAME / LIKE`、ASOF / SEMI / ANTI JOIN、リスト内包表記、ラムダ、COPY、マクロ、ATTACH などに対応しています。詳しくは [DuckDB 固有の機能](guide/duckdb.md)を参照してください。
@@ -45,7 +45,13 @@ appender
 :   spatial の関数や型を使うと、その拡張機能を自動で INSTALL / LOAD します。
 
 安全
-:   値はすべて `?` パラメータとしてバインドされます。DDL など DuckDB がパラメータを受け付けない場所では、エスケープ済みのリテラルとして展開されます。識別子は常にクォートされます。
+:   値はすべて `?` パラメータとして DuckDB に渡されます。DDL など DuckDB がパラメータを受け付けない場所では、エスケープ済みのリテラルとして展開されます。識別子は常にクォートされます。
+
+## ドキュメントの構成
+
+- [ガイド](guide/getting-started.md)：使い方を、はじめから順に説明します。
+- [内部設計](internals/index.md)：Python のコードが SQL になって実行されるまでの仕組みと、型安全を実現している方法を説明します。
+- [API リファレンス](reference/index.md)：docstring から生成したリファレンスです。
 
 ## インストール
 

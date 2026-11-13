@@ -1,6 +1,6 @@
 # 型安全
 
-parrotlet の式はすべて `Expr[T]` です。`T` は `parrotlet.sqltypes` の SQL 型（`Integer`、`Varchar`、`Timestamp`、`List[T]`、`Geometry` など）で、静的な型チェックのためだけに存在します（実行時には使われません）。
+parrotlet の式はすべて `Expr[T]` です。`T` は `parrotlet.type` の型のクラス（`Integer`、`Varchar`、`Timestamp`、`List[T]`、`Geometry` など）です。式の型としては静的な型チェックのためだけに使われ、実行時の式のオブジェクトは `T` を持ちません。
 
 ## 暗黙キャストを表す型の階層
 
@@ -15,7 +15,7 @@ Json, Enum ⊂ Varchar
 Array[T] ⊂ List[T]
 ```
 
-そのため、DuckDB で通る組み合わせはそのまま型チェックも通ります（`Expr[Integer]` は `Expr[Double]` を取る関数に渡せます）。
+そのため、DuckDB が受け付ける組み合わせは、そのまま型チェックも通ります（`Expr[Integer]` は `Expr[Double]` を取る関数に渡せます）。
 
 ## 演算子
 
@@ -25,7 +25,7 @@ User.age + 1.5  # Expr[Double]
 User.age / 2  # Expr[Double]（DuckDB の / は浮動小数点除算）
 User.age // 2  # Expr[BigInt]
 Order.ordered_at - Order.ordered_at  # Expr[Interval]
-User.born + 1  # Expr[Date]
+User.joined + timedelta(days=1)  # Expr[Timestamp]
 User.tags[1]  # List[Varchar] の要素 → Expr[Varchar]
 (User.age > 20) & (User.name == "a")  # Expr[Boolean]
 ```
@@ -56,19 +56,19 @@ select(User.id).from_(User).join(Order, Order.id)  # 型エラー
 生成された関数は、引数と戻り値に型が付いています。
 
 ```python
-F.upper(User.name)  # Func[Varchar]
-F.date_trunc("day", User.born)  # Func[Timestamp]
-F.sum(Order.amount)  # AggregateFunc[Decimal]
-F.coalesce(User.age, 0)  # Func[BigInt]（引数の型から決まる）
-F.list_transform(User.tags, lambda s: F.length(s))  # Func[List[BigInt]]
-F.upper(User.age)  # 型エラー
-select(F.row_number())  # 型エラー：window 関数は .over() が必要
+fn.upper(User.name)  # Func[Varchar]
+fn.date_trunc("day", User.joined)  # Func[Timestamp]
+fn.sum(Order.amount)  # AggregateFunc[Decimal]
+fn.coalesce(User.age, 0)  # Func[BigInt]（引数の型から決まる）
+fn.list_transform(User.tags, lambda s: fn.length(s))  # Func[List[BigInt]]
+fn.upper(User.age)  # 型エラー
+select(fn.row_number())  # 型エラー：window 関数は .over() が必要
 ```
 
 ## CAST と値
 
 ```python
-User.age.cast(dt.VARCHAR)  # Expr[Varchar]
+User.age.cast(qlt.Varchar)  # Expr[Varchar]
 val(1)  # Param[Integer]（Python の型から推論）
 lit("x")  # Lit[Varchar]（インラインのリテラル）
 ```
@@ -83,4 +83,4 @@ lit("x")  # Lit[Varchar]（インラインのリテラル）
 - `func.<name>(...)`
 - 型を推論できないカラム
 
-型を付けたいときは、`col("age", type_=dt.INTEGER)` や `sql(t"...").cast(dt.DATE)` を使います。
+型を付けたいときは、`col("age", type_=qlt.Integer)` や `sql(t"...").cast(qlt.Date)` を使います。

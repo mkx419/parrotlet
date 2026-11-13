@@ -3,14 +3,15 @@ import shapely
 from shapely.geometry import LineString, Point, Polygon
 from shapely.geometry.base import BaseGeometry
 
-from parrotlet import Column, Model, col, column, create_table, datatype, insert, lit, select, val
+import parrotlet.type as qlt
+from parrotlet import Column, Model, col, column, create_table, insert, lit, select, val
 
 point = Point(1.5, 2)
 square = Polygon([(0, 0), (1, 0), (1, 1), (0, 1)])
 
 
 def fetch_geometry(con: duckdb.DuckDBPyConnection, q: object) -> object:
-    row = q.execute(con).fetchone()  # type: ignore[attr-defined]
+    row = q.execute(con).fetchone()  # type: ignore[attr-defined]  # ty: ignore[unresolved-attribute]
     assert row is not None
     return shapely.from_wkb(row[0])
 
@@ -39,9 +40,9 @@ def test_nested_geometry_is_inlined(con: duckdb.DuckDBPyConnection) -> None:
 
 
 class Place(Model, table="places"):
-    id: Column[int] = column(datatype.INTEGER, primary_key=True)
+    id: Column[int] = column(qlt.Integer, primary_key=True)
     geom: Column[BaseGeometry] = column(default=Point(0, 0))
-    area: Column[BaseGeometry | None] = column(datatype.GEOMETRY("OGC:CRS84"), default=None)
+    area: Column[BaseGeometry | None] = column(qlt.Geometry("OGC:CRS84"), default=None)
 
 
 def test_geometry_column_round_trip(con: duckdb.DuckDBPyConnection) -> None:

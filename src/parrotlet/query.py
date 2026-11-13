@@ -4,13 +4,15 @@ from __future__ import annotations
 
 import datetime
 import math
+import os
 import re
 from abc import ABC, abstractmethod
-from collections.abc import Iterable, Iterator
-from contextlib import contextmanager
+from collections.abc import Generator, Iterable
+from contextlib import AbstractContextManager, contextmanager
 from contextvars import ContextVar
 from dataclasses import dataclass
 from decimal import Decimal
+from pathlib import PurePath
 from string.templatelib import Template
 from typing import TYPE_CHECKING, Any, LiteralString, override
 from uuid import UUID
@@ -19,6 +21,11 @@ from shapely.geometry.base import BaseGeometry
 
 if TYPE_CHECKING:
     import duckdb
+
+    from parrotlet.database import Database
+
+
+# region Query
 
 
 @dataclass(frozen=True, slots=True)
@@ -47,47 +54,16 @@ class Query:
         With `auto_install`, extensions the query is known to need (e.g. spatial functions) are installed and loaded
         first, and an error saying a function "exists in the X extension" triggers one install/load and retry.
         """
-        import duckdb
+        from parrotlet.execution import run_query
 
-        target = con if con is not None else duckdb.default_connection()
-        if auto_install and self.extensions:
-            ensure_extensions(target, self.extensions)
-        try:
-            return target.execute(self.sql, list(self.params))
-        except duckdb.Error as error:
-            missing = _MISSING_EXTENSION.search(str(error)) if auto_install else None
-            if missing is None:
-                raise
-            ensure_extensions(target, {missing.group(1)})
-            return target.execute(self.sql, list(self.params))
-
-
-_MISSING_EXTENSION = re.compile(r"exists in the (\w+) extension")
-
-
-def ensure_extensions(con: duckdb.DuckDBPyConnection, names: Iterable[str]) -> None:
-    """INSTALL (if needed) and LOAD each extension on `con`."""
-    for name in names:
-        if not re.fullmatch(r"\w+", name):
-            raise ValueError(f"Invalid extension name: {name!r}")
-        row = con.execute(
-            "SELECT installed, loaded FROM duckdb_extensions() WHERE extension_name = ?",
-            [name],
-        ).fetchone()
-        if row is not None and row[1]:
-            continue
-        if row is None or not row[0]:
-            con.execute(f"INSTALL {name}")
-        con.execute(f"LOAD {name}")
+        return run_query(self, con, auto_install=auto_install)
 
 
 EMPTY = Query("")
+# endregion
 
-_NO_PARAMS_ERRORS = (
-    "parameters are not supported for a statement that expands into several",
-    "can't be prepared",
-    "Parameter expressions within macro",
-)
+
+# region Node
 
 
 class Node(ABC):
@@ -122,10 +98,18 @@ class Node(ABC):
         Runs on `con`, else on the `Database` the statement was created from (`db.select(...)`), else on DuckDB's
         default connection. Needed extensions are installed/loaded automatically.
         """
-        db = getattr(self, "_db", None)
+        db = self._database()
         if con is None and db is not None:
             return db.execute(self)
         return self.execute_on(con)
+
+    def _database(self) -> Database | None:
+        """The `Database` this node is bound to (statements created from `db`); plain nodes have none."""
+        return None
+
+    def _returns_rows(self) -> bool:
+        """False for statements that produce no result set (DML without RETURNING)."""
+        return True
 
     def execute_on(
         self,
@@ -138,13 +122,9 @@ class Node(ABC):
         Some DuckDB statements cannot take parameters (e.g. a PIVOT without an IN list inside a query, which DuckDB
         expands into several statements); those are retried once with the values rendered as literals.
         """
-        query = self.build()
-        try:
-            return query.execute(con, auto_install=auto_install)
-        except Exception as error:
-            if not query.params or not any(m in str(error) for m in _NO_PARAMS_ERRORS):
-                raise
-        return self.build_inline().execute(con, auto_install=auto_install)
+        from parrotlet.execution import run_node
+
+        return run_node(self, con, auto_install=auto_install)
 
     def fetchall(self, con: duckdb.DuckDBPyConnection | None = None) -> list[tuple[Any, ...]]:
         """Execute and return all rows as tuples."""
@@ -162,21 +142,27 @@ class Node(ABC):
         """Execute and return a polars DataFrame (requires polars)."""
         return getattr(self.execute(con), "pl")()  # noqa: B009
 
-    def fetch[R](self, into: type[R], con: duckdb.DuckDBPyConnection | None = None) -> list[R]:
+    def fetch_as[R](self, into: type[R], con: duckdb.DuckDBPyConnection | None = None) -> list[R]:
         """Execute and convert every row into `into` (a dataclass, NamedTuple, TypedDict or annotated class).
 
         Columns are matched to fields by name; shapely-annotated fields get geometries decoded from WKB.
         """
         from parrotlet.result import rows_into
 
-        if getattr(self, "_returning", None) == ():
+        if not self._returns_rows():
             raise ValueError("This statement returns no rows; add .returning(...) to fetch from INSERT/UPDATE/DELETE")
         return rows_into(self.execute(con), into)
 
-    def fetch_one[R](self, into: type[R], con: duckdb.DuckDBPyConnection | None = None) -> R | None:
-        """Like `fetch`, returning the first row or None."""
-        rows = self.fetch(into, con)
+    def fetch_one_as[R](self, into: type[R], con: duckdb.DuckDBPyConnection | None = None) -> R | None:
+        """Like `fetch_as`, returning the first row or None."""
+        rows = self.fetch_as(into, con)
         return rows[0] if rows else None
+
+
+# endregion
+
+
+# region Fragment assembly
 
 
 def text(sql: LiteralString) -> Query:
@@ -213,9 +199,17 @@ def concat(*parts: Node | Query | LiteralString | None) -> Query:
     return result
 
 
-# --------------------------------------------------------------------------------------------------------------------
-# Identifiers
-# --------------------------------------------------------------------------------------------------------------------
+# endregion
+
+
+# region Identifiers
+
+_IDENTIFIER = re.compile(r"[A-Za-z_][A-Za-z0-9_]*")
+
+
+def is_identifier(name: str) -> bool:
+    """True for a plain SQL identifier (letters, digits and underscores, not starting with a digit)."""
+    return _IDENTIFIER.fullmatch(name) is not None
 
 
 def quote_ident(name: str) -> str:
@@ -223,54 +217,86 @@ def quote_ident(name: str) -> str:
     return '"' + name.replace('"', '""') + '"'
 
 
+def ident_list(names: Iterable[str]) -> str:
+    """A parenthesized list of quoted identifiers: `("a", "b")`."""
+    return "(" + ", ".join(quote_ident(n) for n in names) + ")"
+
+
 def qualified(*names: str | None) -> str:
     return ".".join(quote_ident(n) for n in names if n is not None)
 
 
-_BARE_NAME = re.compile(r"[A-Za-z_][A-Za-z0-9_]*")
-
-
 def function_name(name: str) -> str:
     """Render a function name bare if it is a plain identifier (keeps case-insensitive lookup), else quoted."""
-    return name if _BARE_NAME.fullmatch(name) else quote_ident(name)
+    return name if is_identifier(name) else quote_ident(name)
 
 
-# --------------------------------------------------------------------------------------------------------------------
-# Literals
-# --------------------------------------------------------------------------------------------------------------------
+# endregion
+
+
+# region Rendering flags
 
 _inline_params: ContextVar[bool] = ContextVar("parrotlet_inline_params", default=False)
+_unqualified_columns: ContextVar[bool] = ContextVar("parrotlet_unqualified_columns", default=False)
 
 
 @contextmanager
-def inline_params() -> Iterator[None]:
-    """Within this context, parameters are rendered as SQL literals (needed in DDL, where `?` is not allowed)."""
-    token = _inline_params.set(True)
+def _flag_set(flag: ContextVar[bool]) -> Generator[None]:
+    token = flag.set(True)
     try:
         yield
     finally:
-        _inline_params.reset(token)
+        flag.reset(token)
+
+
+def inline_params() -> AbstractContextManager[None]:
+    """Within this context, parameters are rendered as SQL literals (needed in DDL, where `?` is not allowed)."""
+    return _flag_set(_inline_params)
 
 
 def is_inlining() -> bool:
     return _inline_params.get()
 
 
-_unqualified_columns: ContextVar[bool] = ContextVar("parrotlet_unqualified_columns", default=False)
-
-
-@contextmanager
-def unqualified_columns() -> Iterator[None]:
+def unqualified_columns() -> AbstractContextManager[None]:
     """Within this context, column references drop their table qualifier (for CREATE TABLE bodies)."""
-    token = _unqualified_columns.set(True)
-    try:
-        yield
-    finally:
-        _unqualified_columns.reset(token)
+    return _flag_set(_unqualified_columns)
 
 
 def is_unqualified() -> bool:
     return _unqualified_columns.get()
+
+
+# endregion
+
+
+# region Paths
+
+type PathLike = str | os.PathLike[str]
+"""A file path: a `str` or a `pathlib.Path` (any `os.PathLike[str]`)."""
+
+
+def path_str(path: PathLike) -> str:
+    """The path as text for SQL. `pathlib` paths use forward slashes, which DuckDB accepts on every platform."""
+    text = path.as_posix() if isinstance(path, PurePath) else os.fspath(path)
+    if not isinstance(text, str):
+        raise TypeError(f"Expected a str path, got {type(text).__name__}")
+    return text
+
+
+def _paths_to_str(value: object) -> object:
+    """`pathlib.Path` values (also inside a list or tuple) as `str`, which DuckDB can bind."""
+    if isinstance(value, os.PathLike):
+        return path_str(value)
+    if isinstance(value, (list, tuple)) and any(isinstance(v, os.PathLike) for v in value):
+        return [path_str(v) if isinstance(v, os.PathLike) else v for v in value]
+    return value
+
+
+# endregion
+
+
+# region Literals and parameters
 
 
 def _quote_string(value: str) -> str:
@@ -298,6 +324,8 @@ def render_literal(value: object) -> str:
         return f"{value}::DECIMAL" if value.is_finite() else f"'{value}'::DOUBLE"
     if isinstance(value, str):
         return _quote_string(value)
+    if isinstance(value, os.PathLike):
+        return _quote_string(path_str(value))
     if isinstance(value, (bytes, bytearray, memoryview)):
         return "'" + "".join(f"\\x{b:02X}" for b in bytes(value)) + "'::BLOB"
     if isinstance(value, BaseGeometry):
@@ -340,8 +368,9 @@ def param(value: object) -> Query:
     """A bound parameter, or an inline literal while `inline_params()` is active.
 
     shapely geometries are sent as WKB and cast to DuckDB's `GEOMETRY`. DuckDB cannot bind geometries nested in
-    lists/structs, so such values are rendered inline instead.
+    lists/structs, so such values are rendered inline instead. `pathlib.Path` values are sent as `str`.
     """
+    value = _paths_to_str(value)
     if is_inlining():
         return Query(render_literal(value))
     if isinstance(value, BaseGeometry):
@@ -351,9 +380,10 @@ def param(value: object) -> Query:
     return Query("?", (value,))
 
 
-# --------------------------------------------------------------------------------------------------------------------
-# t-string escape hatch
-# --------------------------------------------------------------------------------------------------------------------
+# endregion
+
+
+# region t-string escape hatch
 
 
 @dataclass(frozen=True, slots=True)
@@ -378,3 +408,6 @@ class RawSQL(Node):
                 result += param(value)
 
         return result
+
+
+# endregion

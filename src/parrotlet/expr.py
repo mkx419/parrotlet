@@ -1,4 +1,4 @@
-"""Typed expressions: `Expr[T]` where `T` is a phantom SQL type from `parrotlet.sqltypes`.
+"""Typed expressions: `Expr[T]` where `T` is a DuckDB type class from `parrotlet.type`.
 
 Python operators build SQL and are type-checked by the operand types:
 
@@ -14,17 +14,29 @@ from __future__ import annotations
 
 import datetime
 import inspect
-from collections.abc import Callable, Iterable, Iterator, Sequence
-from dataclasses import dataclass
+from collections.abc import Callable, Iterable, Iterator, Mapping, Sequence
+from dataclasses import dataclass, replace
 from decimal import Decimal as PyDecimal
 from string.templatelib import Template
-from typing import Any, Literal, LiteralString, NoReturn, TypeVar, overload, override
+from typing import (
+    Any,
+    Literal,
+    LiteralString,
+    NoReturn,
+    Protocol,
+    TypedDict,
+    TypeVar,
+    Unpack,
+    overload,
+    override,
+    runtime_checkable,
+)
+from typing import cast as typing_cast
 from uuid import UUID
 
 from shapely.geometry.base import BaseGeometry
 
-from parrotlet import sqltypes as t
-from parrotlet.datatype import DataType, to_type
+from parrotlet import type as t
 from parrotlet.query import (
     EMPTY,
     Node,
@@ -32,6 +44,7 @@ from parrotlet.query import (
     RawSQL,
     concat,
     function_name,
+    ident_list,
     is_unqualified,
     join,
     param,
@@ -40,6 +53,7 @@ from parrotlet.query import (
     render_literal,
     text,
 )
+from parrotlet.type import TypeLike, to_type
 
 type NullsOrder = Literal["first", "last"]
 type FrameBound = int | datetime.timedelta | None
@@ -89,12 +103,10 @@ _TM = TypeVar("_TM", bound=t.TimeTz)
 _E = TypeVar("_E")
 _K = TypeVar("_K")
 _V = TypeVar("_V")
-_U = TypeVar("_U")
+_S = TypeVar("_S", bound=t.SqlType)
 
 
-# --------------------------------------------------------------------------------------------------------------------
-# Coercion helpers (runtime)
-# --------------------------------------------------------------------------------------------------------------------
+# region Coercion helpers (runtime)
 
 
 def to_expr(value: object) -> Expr[Any]:
@@ -106,12 +118,28 @@ def to_expr(value: object) -> Expr[Any]:
     return Param(value)
 
 
+@runtime_checkable
+class Qualified(Protocol):
+    """A relation that column references are qualified by: a table, an alias, a CTE ... (`source.Source`).
+
+    `source.py` depends on this module, so the expressions here know FROM sources only through this protocol.
+    """
+
+    def qualifier(self) -> tuple[str, ...]: ...
+
+
+def _model_table(cls: type) -> Qualified | None:
+    """The `__table__` of a Model class, or None."""
+    table = getattr(cls, "__table__", None)
+    return table if isinstance(table, Qualified) else None
+
+
 def to_column(value: object) -> Node:
     """Coerce an item in a column-list context: `str` is a column name, `"*"` is `*`, a Model class is `table.*`."""
     if isinstance(value, str):
         return Star() if value == "*" else ColumnRef(value)
-    if isinstance(value, type) and hasattr(value, "__table__"):
-        return Star(value.__table__.qualifier())
+    if isinstance(value, type) and (table := _model_table(value)) is not None:
+        return Star(table.qualifier())
     if isinstance(value, Node):
         return value if isinstance(value, (Expr, Fragment)) else Subquery(value)
     return Param(value)
@@ -128,8 +156,13 @@ def as_tuple[T](value: T | Sequence[T] | None) -> tuple[T, ...]:
     if value is None:
         return ()
     if isinstance(value, (list, tuple)):
-        return tuple(value)
-    return (value,)  # type: ignore[return-value]
+        return tuple(typing_cast(Sequence[T], value))
+    return (typing_cast(T, value),)
+
+
+def order_items(value: object | Sequence[object] | None) -> tuple[Node, ...]:
+    """ORDER BY items from one item, a sequence of items, or None."""
+    return tuple(to_column(o) for o in as_tuple(value))
 
 
 class Fragment(Node):
@@ -138,9 +171,10 @@ class Fragment(Node):
     __slots__ = ()
 
 
-# --------------------------------------------------------------------------------------------------------------------
-# Expression base
-# --------------------------------------------------------------------------------------------------------------------
+# endregion
+
+
+# region Expression base
 
 
 class Expr[T](Node):
@@ -152,7 +186,7 @@ class Expr[T](Node):
     def __bool__(self) -> bool:
         raise TypeError("SQL expressions have no truth value; use & | ~ instead of and/or/not")
 
-    # comparison --------------------------------------------------------------------------------------------------
+    # region comparison
     @overload
     def __eq__(self, other: None) -> Bool: ...
     @overload
@@ -180,7 +214,7 @@ class Expr[T](Node):
     @overload
     def __eq__(self: Expr[t.Map[Any, Any]] | Expr[t.Struct], other: dict[Any, Any]) -> Bool: ...
     @override
-    def __eq__(self, other: object) -> Bool:  # pyright: ignore[reportIncompatibleMethodOverride]
+    def __eq__(self, other: object) -> Bool:  # pyright: ignore[reportIncompatibleMethodOverride]  # ty: ignore[invalid-method-override]
         if other is None:
             return self.is_null()
         return BinaryOp(self, "=", to_expr(other))
@@ -212,7 +246,7 @@ class Expr[T](Node):
     @overload
     def __ne__(self: Expr[t.Map[Any, Any]] | Expr[t.Struct], other: dict[Any, Any]) -> Bool: ...
     @override
-    def __ne__(self, other: object) -> Bool:  # pyright: ignore[reportIncompatibleMethodOverride]
+    def __ne__(self, other: object) -> Bool:  # pyright: ignore[reportIncompatibleMethodOverride]  # ty: ignore[invalid-method-override]
         if other is None:
             return self.is_not_null()
         return BinaryOp(self, "<>", to_expr(other))
@@ -277,7 +311,9 @@ class Expr[T](Node):
     def __ge__(self, other: object) -> Bool:
         return BinaryOp(self, ">=", to_expr(other))
 
-    # logical -----------------------------------------------------------------------------------------------------
+    # endregion
+
+    # region logical
     def __and__(self: Expr[t.Boolean], other: Expr[t.Boolean] | bool) -> Bool:
         return BinaryOp(self, "AND", to_expr(other))
 
@@ -293,7 +329,9 @@ class Expr[T](Node):
     def __invert__(self: Expr[t.Boolean]) -> Bool:
         return UnaryOp("NOT ", self)
 
-    # arithmetic --------------------------------------------------------------------------------------------------
+    # endregion
+
+    # region arithmetic
     @overload
     def __add__(self: Expr[_N], other: Expr[_N] | int | PyDecimal) -> Expr[_N]: ...
     @overload
@@ -416,7 +454,9 @@ class Expr[T](Node):
     def __neg__(self) -> Expr[Any]:
         return UnaryOp("-", self)
 
-    # indexing ----------------------------------------------------------------------------------------------------
+    # endregion
+
+    # region indexing
     @overload
     def __getitem__(self: Expr[t.List[_E]], key: int | Expr[t.BigInt]) -> Expr[_E]: ...
     @overload
@@ -430,7 +470,9 @@ class Expr[T](Node):
     def __getitem__(self, key: object) -> Expr[Any]:
         return Index(self, key)
 
-    # named operators ---------------------------------------------------------------------------------------------
+    # endregion
+
+    # region named operators
     @overload
     def concat(self: Expr[t.Varchar], other: Expr[t.Varchar] | str) -> Expr[t.Varchar]: ...
     @overload
@@ -485,23 +527,27 @@ class Expr[T](Node):
         return BinaryOp(self, "SIMILAR TO", to_expr(pattern))
 
     @overload
-    def cast(self, type_: DataType[_U]) -> Expr[_U]: ...
+    def cast(self, type_: type[_S] | _S) -> Expr[_S]: ...
     @overload
     def cast(self, type_: str) -> Expr[Any]: ...
-    def cast(self, type_: DataType[Any] | str) -> Expr[Any]:
+    def cast(self, type_: TypeLike) -> Expr[Any]:
+        """`CAST(self AS type)`: `User.age.cast(qlt.Varchar)` is an `Expr[Varchar]` (a type name string is untyped)."""
         return Cast(self, to_type(type_), try_=False)
 
     @overload
-    def try_cast(self, type_: DataType[_U]) -> Expr[_U]: ...
+    def try_cast(self, type_: type[_S] | _S) -> Expr[_S]: ...
     @overload
     def try_cast(self, type_: str) -> Expr[Any]: ...
-    def try_cast(self, type_: DataType[Any] | str) -> Expr[Any]:
+    def try_cast(self, type_: TypeLike) -> Expr[Any]:
+        """`TRY_CAST(self AS type)`: NULL instead of an error when the value cannot be converted."""
         return Cast(self, to_type(type_), try_=True)
 
     def collate(self: Expr[t.Varchar], collation: str) -> Expr[t.Varchar]:
         return PostfixOp(self, f" COLLATE {quote_ident(collation)}")
 
-    # boolean tests -----------------------------------------------------------------------------------------------
+    # endregion
+
+    # region boolean tests
     def is_true(self: Expr[t.Boolean]) -> Bool:
         return PostfixOp(self, " IS TRUE")
 
@@ -514,7 +560,9 @@ class Expr[T](Node):
     def is_not_false(self: Expr[t.Boolean]) -> Bool:
         return PostfixOp(self, " IS NOT FALSE")
 
-    # DuckDB operators --------------------------------------------------------------------------------------------
+    # endregion
+
+    # region DuckDB operators
     def json_get(self: Expr[t.Varchar], path: Expr[t.Varchar] | Expr[t.BigInt] | str | int) -> Expr[t.Json]:
         """`json -> path` (JSON path such as `'$.a.b'`, a key, or an array index)."""
         return BinaryOp(self, "->", to_expr(path))
@@ -547,7 +595,9 @@ class Expr[T](Node):
         # Expr defines __getitem__, which would otherwise make every expression silently "iterable".
         raise TypeError(f"{type(self).__name__} is not iterable (only columns(...) can be unpacked with *)")
 
-    # aliasing / ordering -----------------------------------------------------------------------------------------
+    # endregion
+
+    # region aliasing / ordering
     def as_(self, alias: str) -> Aliased:
         return Aliased(self, alias)
 
@@ -556,6 +606,8 @@ class Expr[T](Node):
 
     def desc(self, nulls: NullsOrder | None = None) -> OrderItem:
         return OrderItem(self, desc=True, nulls=nulls)
+
+    # endregion
 
 
 def _in(expr: Expr[Any], values: Iterable[object] | Node, *, negate: bool) -> Bool:
@@ -571,9 +623,10 @@ def _in(expr: Expr[Any], values: Iterable[object] | Node, *, negate: bool) -> Bo
     return InList(expr, items, negate=negate)
 
 
-# --------------------------------------------------------------------------------------------------------------------
-# Leaf expressions
-# --------------------------------------------------------------------------------------------------------------------
+# endregion
+
+
+# region Leaf expressions
 
 
 @dataclass(frozen=True, slots=True, eq=False)
@@ -672,7 +725,7 @@ class Star(Expr[Any]):
         # DuckDB accepts a single name before `.*` (a table, alias or struct column), so drop schema/catalog parts.
         q = Query((qualified(self.qualifier[-1]) + ".*") if self.qualifier else "*")
         if self.exclude:
-            q += Query(" EXCLUDE (" + ", ".join(quote_ident(c) for c in self.exclude) + ")")
+            q += Query(" EXCLUDE " + ident_list(self.exclude))
         if self.pattern is not None:
             op, pattern = self.pattern
             q += Query(f" {op} {render_literal(pattern)}")  # must be a constant, so never a parameter
@@ -691,9 +744,9 @@ class Star(Expr[Any]):
 class ColumnsExpr(Expr[Any]):
     """DuckDB `COLUMNS(...)`: a regex, a list of names, a lambda over column names, or a star expression.
 
-    Use it like a column (`F.max(columns("num_.*"))` applies to every matching column), alias it with regex capture
+    Use it like a column (`fn.max(columns("num_.*"))` applies to every matching column), alias it with regex capture
     groups (`columns("num_(.*)").as_(r"x_\\1")`), or unpack it into a function call with `*`:
-    `F.coalesce(*columns("num_.*"))` renders `coalesce(*COLUMNS('num_.*'))`.
+    `fn.coalesce(*columns("num_.*"))` renders `coalesce(*COLUMNS('num_.*'))`.
     """
 
     selector: Node
@@ -703,7 +756,7 @@ class ColumnsExpr(Expr[Any]):
         return concat("COLUMNS(", self.selector, ")")
 
     @override
-    def __iter__(self) -> Iterator[Expr[Any]]:  # pyright: ignore[reportIncompatibleMethodOverride]
+    def __iter__(self) -> Iterator[Expr[Any]]:  # pyright: ignore[reportIncompatibleMethodOverride]  # ty: ignore[invalid-method-override]
         yield Unpacked(self)
 
 
@@ -718,9 +771,10 @@ class Unpacked(Expr[Any]):
         return concat("*", self.columns)
 
 
-# --------------------------------------------------------------------------------------------------------------------
-# Operators
-# --------------------------------------------------------------------------------------------------------------------
+# endregion
+
+
+# region Operators
 
 
 @dataclass(frozen=True, slots=True, eq=False)
@@ -754,26 +808,41 @@ class PostfixOp[T](Expr[T]):
         return concat("(", self.operand, Query(self.op), ")")
 
 
+class _In(Expr[t.Boolean]):
+    """`expr [NOT] IN (...)`; subclasses render what goes inside the parentheses."""
+
+    __slots__ = ()
+    expr: Expr[Any]
+    negate: bool
+
+    def _values(self) -> Query:
+        raise NotImplementedError
+
+    @override
+    def build(self) -> Query:
+        return concat("(", self.expr, " NOT IN (" if self.negate else " IN (", self._values(), "))")
+
+
 @dataclass(frozen=True, slots=True, eq=False)
-class InList(Expr[t.Boolean]):
+class InList(_In):
     expr: Expr[Any]
     items: tuple[Expr[Any], ...]
     negate: bool
 
     @override
-    def build(self) -> Query:
-        return concat("(", self.expr, " NOT IN (" if self.negate else " IN (", join(", ", self.items), "))")
+    def _values(self) -> Query:
+        return join(", ", self.items)
 
 
 @dataclass(frozen=True, slots=True, eq=False)
-class InSubquery(Expr[t.Boolean]):
+class InSubquery(_In):
     expr: Expr[Any]
     query: Node
     negate: bool
 
     @override
-    def build(self) -> Query:
-        return concat("(", self.expr, " NOT IN (" if self.negate else " IN (", self.query, "))")
+    def _values(self) -> Query:
+        return self.query.build()
 
 
 @dataclass(frozen=True, slots=True, eq=False)
@@ -828,12 +897,12 @@ def _index_part(value: object) -> Query:
 @dataclass(frozen=True, slots=True, eq=False)
 class Cast[T](Expr[T]):
     expr: Expr[Any]
-    type_: DataType[Any]
+    type_: t.SqlType
     try_: bool
 
     @override
     def build(self) -> Query:
-        return concat("TRY_CAST(" if self.try_ else "CAST(", self.expr, " AS ", self.type_, ")")
+        return concat("TRY_CAST(" if self.try_ else "CAST(", self.expr, " AS ", self.type_.build(), ")")
 
 
 @dataclass(frozen=True, slots=True, eq=False)
@@ -870,7 +939,7 @@ class Lambda(Expr[Any]):
 
 
 def cast_callable(fn: object) -> Callable[..., Expr[Any]]:
-    return fn  # type: ignore[return-value]
+    return typing_cast(Callable[..., Expr[Any]], fn)
 
 
 def make_lambda(fn: Callable[..., Expr[Any]]) -> Lambda:
@@ -925,9 +994,32 @@ class Try[T](Expr[T]):
         return concat("TRY(", self.expr, ")")
 
 
-# --------------------------------------------------------------------------------------------------------------------
-# Function calls
-# --------------------------------------------------------------------------------------------------------------------
+# endregion
+
+
+# region Function calls
+
+
+def _call_head(name: str, extension: str | None) -> Query:
+    """`name(`, carrying the extension the function needs."""
+    return Query(function_name(name) + "(", extensions=frozenset({extension} if extension else ()))
+
+
+class Windowable[T](Node):
+    """A function that `.over(...)` turns into a window expression (aggregate and window-only functions)."""
+
+    __slots__ = ()
+
+    def over(
+        self,
+        window: str | Window | None = None,
+        *,
+        partition_by: object | Sequence[object] | None = None,
+        order_by: object | Sequence[object] | None = None,
+        frame: Frame | None = None,
+    ) -> Expr[T]:
+        """Use the function as a window function: `sum(x).over(partition_by=...)`."""
+        return Over(self, _window_spec(window, partition_by, order_by, frame))
 
 
 @dataclass(frozen=True, slots=True, eq=False)
@@ -944,16 +1036,13 @@ class Func[T](Expr[T]):
         named = (concat(Query(quote_ident(k) + " := "), v) for k, v in self.named)
         return join(", ", (*self.args, *named))
 
-    def _head(self) -> Query:
-        return Query(function_name(self.name) + "(", extensions=frozenset({self.extension} if self.extension else ()))
-
     @override
     def build(self) -> Query:
-        return concat(self._head(), self._args(), ")")
+        return concat(_call_head(self.name, self.extension), self._args(), ")")
 
 
 @dataclass(frozen=True, slots=True, eq=False)
-class AggregateFunc[T](Func[T]):
+class AggregateFunc[T](Func[T], Windowable[T]):
     """An aggregate function call: supports DISTINCT, ORDER BY (ordered aggregates), FILTER and OVER."""
 
     distinct: bool = False
@@ -963,7 +1052,7 @@ class AggregateFunc[T](Func[T]):
     @override
     def build(self) -> Query:
         q = concat(
-            self._head(),
+            _call_head(self.name, self.extension),
             "DISTINCT " if self.distinct else None,
             self._args(),
             concat(" ORDER BY ", join(", ", self.order_by)) if self.order_by else None,
@@ -975,31 +1064,11 @@ class AggregateFunc[T](Func[T]):
 
     def filter(self, condition: Expr[t.Boolean]) -> AggregateFunc[T]:
         """`FILTER (WHERE condition)`."""
-        cond = condition if self.filter_ is None else (self.filter_ & condition)
-        return AggregateFunc(
-            self.name,
-            self.args,
-            self.named,
-            self.extension,
-            distinct=self.distinct,
-            order_by=self.order_by,
-            filter_=cond,
-        )
-
-    def over(
-        self,
-        window: str | Window | None = None,
-        *,
-        partition_by: object | Sequence[object] | None = None,
-        order_by: object | Sequence[object] | None = None,
-        frame: Frame | None = None,
-    ) -> Expr[T]:
-        """Use the aggregate as a window function: `sum(x).over(partition_by=...)`."""
-        return Over(self, _window_spec(window, partition_by, order_by, frame))
+        return replace(self, filter_=condition if self.filter_ is None else (self.filter_ & condition))
 
 
 @dataclass(frozen=True, slots=True, eq=False)
-class WindowFunc[T](Node):
+class WindowFunc[T](Windowable[T]):
     """A window-only function (`row_number()`, `lag(x)`, ...). It is not an expression until `.over(...)` is applied."""
 
     name: str
@@ -1011,22 +1080,12 @@ class WindowFunc[T](Node):
     @override
     def build(self) -> Query:
         return concat(
-            Query(function_name(self.name) + "(", extensions=frozenset({self.extension} if self.extension else ())),
+            _call_head(self.name, self.extension),
             join(", ", self.args),
             concat(" ORDER BY ", join(", ", self.order_by)) if self.order_by else None,
             " IGNORE NULLS" if self.ignore_nulls else None,
             ")",
         )
-
-    def over(
-        self,
-        window: str | Window | None = None,
-        *,
-        partition_by: object | Sequence[object] | None = None,
-        order_by: object | Sequence[object] | None = None,
-        frame: Frame | None = None,
-    ) -> Expr[T]:
-        return Over(self, _window_spec(window, partition_by, order_by, frame))
 
 
 def _window_spec(
@@ -1040,7 +1099,7 @@ def _window_spec(
     return Window(
         base=window,
         partition_by=tuple(to_column_expr(e) for e in as_tuple(partition_by)),
-        order_by=tuple(to_column(e) for e in as_tuple(order_by)),
+        order_by=order_items(order_by),
         frame=frame,
     )
 
@@ -1064,7 +1123,7 @@ class _FuncNamespace:
             name,
             tuple(to_expr(a) for a in args),
             distinct=distinct,
-            order_by=tuple(to_column(o) for o in as_tuple(order_by)),
+            order_by=order_items(order_by),
         )
 
     def __getattr__(self, name: str) -> Callable[..., AggregateFunc[Any]]:
@@ -1083,11 +1142,10 @@ class _FuncNamespace:
 
 
 func = _FuncNamespace()
+# endregion
 
 
-# --------------------------------------------------------------------------------------------------------------------
-# CASE
-# --------------------------------------------------------------------------------------------------------------------
+# region CASE
 
 
 @dataclass(frozen=True, slots=True, eq=False)
@@ -1185,9 +1243,10 @@ def case(subject: object = ...) -> CaseStart | SimpleCaseStart[Any]:
     return SimpleCaseStart(to_expr(subject))
 
 
-# --------------------------------------------------------------------------------------------------------------------
-# Window specification
-# --------------------------------------------------------------------------------------------------------------------
+# endregion
+
+
+# region Window specification
 
 
 def _bound(value: FrameBound, *, start: bool) -> str:
@@ -1279,9 +1338,10 @@ class Over[T](Expr[T]):
         return concat(self.expr, " OVER (", w, ")")
 
 
-# --------------------------------------------------------------------------------------------------------------------
-# Non-expression nodes used in column lists
-# --------------------------------------------------------------------------------------------------------------------
+# endregion
+
+
+# region Non-expression nodes used in column lists
 
 
 @dataclass(frozen=True, slots=True, eq=False)
@@ -1309,19 +1369,20 @@ class OrderItem(Fragment):
         )
 
 
-# --------------------------------------------------------------------------------------------------------------------
-# Public constructors
-# --------------------------------------------------------------------------------------------------------------------
+# endregion
+
+
+# region Public constructors
 
 
 @overload
 def col(name: str, table: str | None = None) -> ColumnRef[Any]: ...
 @overload
-def col[U](name: str, table: str | None = None, *, type_: DataType[U]) -> ColumnRef[U]: ...
-def col(name: str, table: str | None = None, *, type_: DataType[Any] | None = None) -> ColumnRef[Any]:
+def col[U: t.SqlType](name: str, table: str | None = None, *, type_: type[U] | U) -> ColumnRef[U]: ...
+def col(name: str, table: str | None = None, *, type_: TypeLike | None = None) -> ColumnRef[Any]:
     """A column reference, optionally qualified by a table name or alias.
 
-    Untyped (`ColumnRef[Any]`) unless `type_` is given: `col("age", type_=dt.INTEGER)` is a `ColumnRef[Integer]`.
+    Untyped (`ColumnRef[Any]`) unless `type_` is given: `col("age", type_=qlt.Integer)` is a `ColumnRef[Integer]`.
     `type_` only affects static typing; nothing is rendered for it.
     """
     del type_
@@ -1393,7 +1454,7 @@ def lit(value: object) -> Lit[Any]:
 def sql(template: Template) -> SQL[Any]:
     """Embed raw SQL from a t-string: `sql(t"date_trunc('day', {ts})")`. Interpolated values are parameters.
 
-    The result is untyped (`Expr[Any]`); cast it (`sql(...).cast(dt.DATE)`) to give it a type.
+    The result is untyped (`Expr[Any]`); cast it (`sql(...).cast(qlt.Date)`) to give it a type.
     """
     return SQL(template)
 
@@ -1408,51 +1469,47 @@ TRUE = Keyword[t.Boolean]("true")
 FALSE = Keyword[t.Boolean]("false")
 
 
-def make_star(
-    qualifier: tuple[str, ...] = (),
-    *,
-    exclude: Sequence[str] = (),
-    replace: dict[str, Expr[Any] | PyScalar] | None = None,
-    rename: dict[str, str] | None = None,
-    like: str | None = None,
-    not_like: str | None = None,
-    ilike: str | None = None,
-    not_ilike: str | None = None,
-    glob: str | None = None,
-    similar_to: str | None = None,
-) -> Star:
-    candidates: tuple[tuple[StarPattern, str | None], ...] = (
-        ("LIKE", like),
-        ("NOT LIKE", not_like),
-        ("ILIKE", ilike),
-        ("NOT ILIKE", not_ilike),
-        ("GLOB", glob),
-        ("SIMILAR TO", similar_to),
-    )
-    patterns: list[tuple[StarPattern, str]] = [(op, p) for op, p in candidates if p is not None]
+class StarModifiers(TypedDict, total=False):
+    """DuckDB's star modifiers, the keyword arguments of `star()` and `table.star()`."""
+
+    exclude: Sequence[str]
+    replace: Mapping[str, Expr[Any] | PyScalar] | None
+    rename: Mapping[str, str] | None
+    like: str | None
+    not_like: str | None
+    ilike: str | None
+    not_ilike: str | None
+    glob: str | None
+    similar_to: str | None
+
+
+_STAR_PATTERNS: tuple[tuple[StarPattern, str], ...] = (
+    ("LIKE", "like"),
+    ("NOT LIKE", "not_like"),
+    ("ILIKE", "ilike"),
+    ("NOT ILIKE", "not_ilike"),
+    ("GLOB", "glob"),
+    ("SIMILAR TO", "similar_to"),
+)
+
+
+def make_star(qualifier: tuple[str, ...] = (), **modifiers: Unpack[StarModifiers]) -> Star:
+    options: Mapping[str, Any] = modifiers
+    patterns: list[tuple[StarPattern, str]] = [
+        (op, p) for op, key in _STAR_PATTERNS if (p := options.get(key)) is not None
+    ]
     if len(patterns) > 1:
         raise ValueError("Give at most one of like / not_like / ilike / not_ilike / glob / similar_to")
     return Star(
         qualifier,
-        tuple(exclude),
-        tuple((to_expr(v), k) for k, v in (replace or {}).items()),
-        tuple((rename or {}).items()),
+        tuple(modifiers.get("exclude", ())),
+        tuple((to_expr(v), k) for k, v in (modifiers.get("replace") or {}).items()),
+        tuple((modifiers.get("rename") or {}).items()),
         patterns[0] if patterns else None,
     )
 
 
-def star(
-    *,
-    exclude: Sequence[str] = (),
-    replace: dict[str, Expr[Any] | PyScalar] | None = None,
-    rename: dict[str, str] | None = None,
-    like: str | None = None,
-    not_like: str | None = None,
-    ilike: str | None = None,
-    not_ilike: str | None = None,
-    glob: str | None = None,
-    similar_to: str | None = None,
-) -> Star:
+def star(**modifiers: Unpack[StarModifiers]) -> Star:
     """`*` with DuckDB's star modifiers.
 
     - `exclude=["a"]`              `* EXCLUDE ("a")`
@@ -1461,18 +1518,7 @@ def star(
     - `like="num%"`                `* LIKE 'num%'`: keep columns whose name matches (also `not_like`, `ilike`,
                                      `not_ilike`, `glob`, `similar_to`)
     """
-    return make_star(
-        (),
-        exclude=exclude,
-        replace=replace,
-        rename=rename,
-        like=like,
-        not_like=not_like,
-        ilike=ilike,
-        not_ilike=not_ilike,
-        glob=glob,
-        similar_to=similar_to,
-    )
+    return make_star((), **modifiers)
 
 
 @overload
@@ -1491,12 +1537,12 @@ def columns(selector: object) -> ColumnsExpr:
         return ColumnsExpr(Lit(selector))
     if isinstance(selector, (list, tuple)):
         return ColumnsExpr(Lit(list(selector)))
-    if isinstance(selector, type) and hasattr(selector, "__table__"):
-        return ColumnsExpr(Star(selector.__table__.qualifier()))
+    if isinstance(selector, type) and (table := _model_table(selector)) is not None:
+        return ColumnsExpr(Star(table.qualifier()))
     if isinstance(selector, Node):
-        qualifier: Callable[[], tuple[str, ...]] | None = getattr(selector, "qualifier", None)
-        if callable(qualifier) and not isinstance(selector, Expr):  # a FROM source such as table("t")
-            return ColumnsExpr(Star(qualifier()))
+        # a FROM source such as table("t"); expressions such as ColumnRef have a `qualifier` field, not a method
+        if isinstance(selector, Qualified) and not isinstance(selector, Expr):
+            return ColumnsExpr(Star(selector.qualifier()))
         return ColumnsExpr(selector)
     if callable(selector):
         return ColumnsExpr(make_lambda(cast_callable(selector)))
@@ -1594,16 +1640,21 @@ def not_exists(query: Node) -> Bool:
 
 
 @overload
-def cast[U](value: Expr[Any] | PyScalar, type_: DataType[U]) -> Expr[U]: ...
+def cast[U: t.SqlType](value: Expr[Any] | PyScalar, type_: type[U] | U) -> Expr[U]: ...
 @overload
 def cast(value: Expr[Any] | PyScalar, type_: str) -> Expr[Any]: ...
-def cast(value: object, type_: DataType[Any] | str) -> Expr[Any]:
+def cast(value: object, type_: TypeLike) -> Expr[Any]:
+    """`CAST(value AS type)`; see `Expr.cast`."""
     return to_expr(value).cast(type_)
 
 
 @overload
-def try_cast[U](value: Expr[Any] | PyScalar, type_: DataType[U]) -> Expr[U]: ...
+def try_cast[U: t.SqlType](value: Expr[Any] | PyScalar, type_: type[U] | U) -> Expr[U]: ...
 @overload
 def try_cast(value: Expr[Any] | PyScalar, type_: str) -> Expr[Any]: ...
-def try_cast(value: object, type_: DataType[Any] | str) -> Expr[Any]:
+def try_cast(value: object, type_: TypeLike) -> Expr[Any]:
+    """`TRY_CAST(value AS type)`; see `Expr.try_cast`."""
     return to_expr(value).try_cast(type_)
+
+
+# endregion

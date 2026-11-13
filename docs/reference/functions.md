@@ -1,6 +1,6 @@
 # 関数（core）
 
-`from parrotlet import functions as F`。DuckDB の関数カタログから生成した関数と、手書きのジェネリック関数です。
+`import parrotlet.functions as fn`。DuckDB の関数カタログから生成した関数と、手書きのジェネリック関数です。
 
 ## ジェネリック関数
 

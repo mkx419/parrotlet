@@ -8,13 +8,19 @@
 >>> q.params
 (20,)
 
-Typed DuckDB functions live in `parrotlet.functions` (import it explicitly: `from parrotlet import functions as F`).
+The usual imports are:
+
+```python
+import parrotlet as ql
+import parrotlet.functions as fn  # typed DuckDB functions; also `fn.spatial` and `fn.table`
+import parrotlet.type as qlt  # DuckDB data types
+```
 """
 
-from parrotlet import datatype, sqltypes
+from parrotlet import functions as fn
+from parrotlet import type as type  # noqa: A004 - the module `parrotlet.type`, reached as `ql.type`
 from parrotlet.appender import Appender
 from parrotlet.database import Database
-from parrotlet.datatype import DataType
 from parrotlet.expr import (
     DEFAULT,
     FALSE,
@@ -125,6 +131,7 @@ from parrotlet.statement import (
     use,
     vacuum,
 )
+from parrotlet.type import SqlType
 
 __all__ = [
     "CTE",
@@ -139,7 +146,6 @@ __all__ = [
     "Compound",
     "Constraint",
     "CreateTable",
-    "DataType",
     "Database",
     "Delete",
     "Expr",
@@ -152,6 +158,7 @@ __all__ = [
     "PrimaryKey",
     "Query",
     "Select",
+    "SqlType",
     "Table",
     "Unique",
     "Unpivot",
@@ -188,7 +195,6 @@ __all__ = [
     "create_type",
     "create_view",
     "cube",
-    "datatype",
     "delete",
     "describe",
     "detach",
@@ -206,6 +212,7 @@ __all__ = [
     "explain",
     "export_database",
     "file",
+    "fn",
     "from_",
     "func",
     "grouping_sets",
@@ -237,7 +244,6 @@ __all__ = [
     "show_databases",
     "show_tables",
     "sql",
-    "sqltypes",
     "star",
     "summarize",
     "table",
@@ -246,6 +252,7 @@ __all__ = [
     "truncate",
     "try_",
     "try_cast",
+    "type",
     "unpivot",
     "update",
     "use",

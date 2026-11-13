@@ -7,6 +7,8 @@ from pathlib import Path
 import duckdb
 import pytest
 
+import parrotlet.functions as fn
+import parrotlet.type as qlt
 from parrotlet import (
     Column,
     Model,
@@ -24,6 +26,7 @@ from parrotlet import (
     create_index,
     create_macro,
     create_schema,
+    create_secret,
     create_sequence,
     create_table,
     create_type,
@@ -31,6 +34,7 @@ from parrotlet import (
     describe,
     detach,
     drop_macro,
+    drop_secret,
     drop_table,
     drop_view,
     file,
@@ -49,6 +53,7 @@ from parrotlet import (
     select,
     set_,
     set_variable,
+    show_databases,
     show_tables,
     star,
     summarize,
@@ -61,21 +66,18 @@ from parrotlet import (
     val,
     values,
 )
-from parrotlet import datatype as dt
-from parrotlet import functions as F
-from parrotlet.functions import tables as TF
 
 
 class T(Model, table="t"):
-    id: Column[int] = column(dt.INTEGER, primary_key=True)
+    id: Column[int] = column(qlt.Integer, primary_key=True)
     name: Column[str | None]
-    num_a: Column[int | None] = column(dt.INTEGER)
-    num_b: Column[int | None] = column(dt.INTEGER)
+    num_a: Column[int | None] = column(qlt.Integer)
+    num_b: Column[int | None] = column(qlt.Integer)
     cat: Column[str | None]
-    yr: Column[int | None] = column(dt.INTEGER)
-    v: Column[int | None] = column(dt.INTEGER)
-    tags: Column[list[int] | None] = column(dt.LIST(dt.INTEGER))
-    j: Column[str | None] = column(dt.JSON)
+    yr: Column[int | None] = column(qlt.Integer)
+    v: Column[int | None] = column(qlt.Integer)
+    tags: Column[list[int] | None] = column(qlt.List(qlt.Integer))
+    j: Column[str | None] = column(qlt.Json)
     ts: Column[datetime.datetime | None]
 
 
@@ -121,7 +123,7 @@ def test_star_modifiers(db: duckdb.DuckDBPyConnection) -> None:
     ],
 )
 def test_star_patterns(db: duckdb.DuckDBPyConnection, kwargs: dict[str, str], expected: list[str]) -> None:
-    assert names(select(star(**kwargs)).from_(T).execute(db)) == expected  # type: ignore[arg-type]
+    assert names(select(star(**kwargs)).from_(T).execute(db)) == expected  # type: ignore[arg-type]  # ty: ignore[invalid-argument-type]
 
 
 def test_star_pattern_with_exclude_and_table_star(db: duckdb.DuckDBPyConnection) -> None:
@@ -135,7 +137,7 @@ def test_star_pattern_with_exclude_and_table_star(db: duckdb.DuckDBPyConnection)
 
 
 def test_struct_star(db: duckdb.DuckDBPyConnection) -> None:
-    s = col("s", type_=dt.STRUCT(a=dt.INTEGER, b=dt.VARCHAR))
+    s = col("s", type_=qlt.Struct(a=qlt.Integer, b=qlt.Varchar))
     q = select(s.star()).from_(select(lit({"a": 1, "b": "x"}).as_("s")).subquery("q"))
     assert names(q.execute(db)) == ["a", "b"]
 
@@ -150,10 +152,10 @@ def test_columns_selectors(db: duckdb.DuckDBPyConnection) -> None:
 
 
 def test_columns_expressions_and_unpacking(db: duckdb.DuckDBPyConnection) -> None:
-    assert select(F.max(columns("num_.*"))).from_(T).execute(db).fetchall() == [(6, 7)]
+    assert select(fn.max(columns("num_.*"))).from_(T).execute(db).fetchall() == [(6, 7)]
     renamed = select(columns("num_(.*)").as_(r"x_\1")).from_(T)
     assert names(renamed.execute(db)) == ["x_a", "x_b"]
-    unpacked = select(F.coalesce(T.v, *columns("num_.*"))).from_(T).order_by(T.id)
+    unpacked = select(fn.coalesce(T.v, *columns("num_.*"))).from_(T).order_by(T.id)
     assert 'coalesce("t"."v", *COLUMNS(\'num_.*\'))' in unpacked.sql
     assert unpacked.execute(db).fetchall() == [(10,), (20,), (30,)]
     assert select().from_(T).where(columns(["num_a", "num_b"]) > 3).execute(db).fetchall()[0][0] == 2
@@ -196,7 +198,7 @@ def test_any_all_try(db: duckdb.DuckDBPyConnection) -> None:
         (3,),
     ]
     assert select(T.id).from_(T).where(T.id == any_(lit([1, 3]))).order_by(T.id).execute(db).fetchall() == [(1,), (3,)]
-    assert select(try_(val("x").cast(dt.INTEGER))).execute(db).fetchall() == [(None,)]
+    assert select(try_(val("x").cast(qlt.Integer))).execute(db).fetchall() == [(None,)]
 
 
 def test_boolean_tests_and_time_zone(db: duckdb.DuckDBPyConnection) -> None:
@@ -205,12 +207,12 @@ def test_boolean_tests_and_time_zone(db: duckdb.DuckDBPyConnection) -> None:
 
 
 def test_window_frame_options(db: duckdb.DuckDBPyConnection) -> None:
-    excl = F.sum(T.v).over(order_by=T.id, frame=rows_between(None, None, exclude="current row"))
+    excl = fn.sum(T.v).over(order_by=T.id, frame=rows_between(None, None, exclude="current row"))
     assert "EXCLUDE CURRENT ROW" in excl.sql
     assert select(excl).from_(T).order_by(T.id).execute(db).fetchall() == [(50,), (40,), (30,)]
-    days = F.sum(T.v).over(order_by=T.ts, frame=range_between(-datetime.timedelta(days=1), 0))
+    days = fn.sum(T.v).over(order_by=T.ts, frame=range_between(-datetime.timedelta(days=1), 0))
     assert select(days).from_(T).order_by(T.id).execute(db).fetchall() == [(10,), (30,), (30,)]
-    ordered = F.first_value(T.v, order_by=T.id.desc(), ignore_nulls=True).over()
+    ordered = fn.first_value(T.v, order_by=T.id.desc(), ignore_nulls=True).over()
     assert 'first_value("t"."v" ORDER BY "t"."id" DESC IGNORE NULLS) OVER ()' in ordered.sql
     assert select(ordered).from_(T).execute(db).fetchall()[0] == (30,)
 
@@ -230,7 +232,7 @@ def test_column_aliases(db: duckdb.DuckDBPyConnection) -> None:
     assert select(aliased.c.c2).from_(aliased).order_by(aliased.c.c1).limit(1).execute(db).fetchall() == [("x",)]
     sub = select(T.id, T.name).from_(T).subquery("s", columns=["a", "b"])
     assert select(sub.c.b).from_(sub).where(sub.c.a == 2).execute(db).fetchall() == [("y",)]
-    ordinal = TF.unnest(["p", "q"]).as_("u", ["x", "i"]).with_ordinality()
+    ordinal = fn.table.unnest(["p", "q"]).as_("u", ["x", "i"]).with_ordinality()
     assert select().from_(ordinal).execute(db).fetchall() == [("p", 1), ("q", 2)]
 
 
@@ -238,12 +240,12 @@ def test_file_source(db: duckdb.DuckDBPyConnection, tmp_path: Path) -> None:
     path = (tmp_path / "t.parquet").as_posix()
     copy_to(T, path, format="parquet").execute(db)
     f = file(path).as_("f")
-    assert select(F.count()).from_(f).execute(db).fetchall() == [(3,)]
+    assert select(fn.count()).from_(f).execute(db).fetchall() == [(3,)]
     assert select(f.c.name).from_(f).where(f.c.id == 2).execute(db).fetchall() == [("y",)]
 
 
 def test_tablesample_and_limit_percent(db: duckdb.DuckDBPyConnection) -> None:
-    q = select(F.count()).from_(tablesample(T, rows=2, method="reservoir", seed=1))
+    q = select(fn.count()).from_(tablesample(T, rows=2, method="reservoir", seed=1))
     assert q.sql == 'SELECT count(*) FROM "t" TABLESAMPLE reservoir(2 ROWS) REPEATABLE (1)'
     assert q.execute(db).fetchall() == [(2,)]
     assert "TABLESAMPLE 50 PERCENT" in select().from_(table("t").tablesample(percent=50)).sql
@@ -262,7 +264,7 @@ def test_recursive_cte_using_key(db: duckdb.DuckDBPyConnection) -> None:
 
 
 def test_pivot(db: duckdb.DuckDBPyConnection) -> None:
-    p = pivot(T).on(T.cat, values=["a", "b"]).using(F.sum(T.v).as_("total")).group_by(T.yr).order_by(T.yr)
+    p = pivot(T).on(T.cat, values=["a", "b"]).using(fn.sum(T.v).as_("total")).group_by(T.yr).order_by(T.yr)
     assert p.sql == ('PIVOT "t" ON "cat" IN (?, ?) USING sum("v") AS "total" GROUP BY "yr" ORDER BY "yr"')
     cur = p.execute(db)
     assert names(cur) == ["yr", "a_total", "b_total"]
@@ -270,7 +272,7 @@ def test_pivot(db: duckdb.DuckDBPyConnection) -> None:
 
 
 def test_pivot_as_subquery_falls_back_to_literals(db: duckdb.DuckDBPyConnection) -> None:
-    p = pivot(T).on(T.cat).using(F.sum(T.v)).group_by(T.yr).subquery("p")
+    p = pivot(T).on(T.cat).using(fn.sum(T.v)).group_by(T.yr).subquery("p")
     q = select(p.c.yr, p.c.a).from_(p).where(p.c.yr > 2025)
     assert q.params == (2025,)  # DuckDB rejects parameters here; execute() retries with literals
     assert q.execute(db).fetchall() == [(2026, 30)]
@@ -306,7 +308,7 @@ def test_merge(db: duckdb.DuckDBPyConnection) -> None:
 def test_merge_variants(db: duckdb.DuckDBPyConnection) -> None:
     src = select(T.id, T.name).from_(T).where(T.id == 2).subquery("s")
     merge_into(T).using(src, columns="id").when_matched().delete().when_not_matched().insert_by_name().execute(db)
-    assert select(F.count()).from_(T).execute(db).fetchall() == [(2,)]
+    assert select(fn.count()).from_(T).execute(db).fetchall() == [(2,)]
     q = merge_into(T).using(T, columns="id").when_not_matched_by_source(T.id > 100).delete()
     assert " WHEN NOT MATCHED BY SOURCE AND " in q.sql
     q.execute(db)
@@ -318,7 +320,7 @@ def test_merge_variants(db: duckdb.DuckDBPyConnection) -> None:
 def test_insert_by_position_and_truncate(db: duckdb.DuckDBPyConnection) -> None:
     assert insert(T).by_position().select(select().from_(T).limit(0)).sql.startswith('INSERT INTO "t" BY POSITION')
     truncate(T).execute(db)
-    assert select(F.count()).from_(T).execute(db).fetchall() == [(0,)]
+    assert select(fn.count()).from_(T).execute(db).fetchall() == [(0,)]
 
 
 def test_copy(db: duckdb.DuckDBPyConnection, tmp_path: Path) -> None:
@@ -349,11 +351,11 @@ def test_create_view_inlines_values(db: duckdb.DuckDBPyConnection) -> None:
 def test_schema_sequence_index_type(db: duckdb.DuckDBPyConnection) -> None:
     create_schema("sc", if_not_exists=True).execute(db)
     create_sequence(("sc", "seq"), start=10, increment=5).execute(db)
-    assert select(F.nextval("sc.seq"), F.nextval("sc.seq")).execute(db).fetchall() == [(10, 15)]
-    idx = create_index("ix", T, T.name, F.lower(T.name), unique=False, if_not_exists=True)
+    assert select(fn.nextval("sc.seq"), fn.nextval("sc.seq")).execute(db).fetchall() == [(10, 15)]
+    idx = create_index("ix", T, T.name, fn.lower(T.name), unique=False, if_not_exists=True)
     assert idx.sql == 'CREATE INDEX IF NOT EXISTS "ix" ON "t" ("name", (lower("name")))'
     idx.execute(db)
-    create_type("mood", dt.ENUM("sad", "ok")).execute(db)
+    create_type("mood", qlt.Enum("sad", "ok")).execute(db)
     assert db.execute("SELECT 'ok'::mood").fetchall() == [("ok",)]
 
 
@@ -362,7 +364,7 @@ def test_macros(db: duckdb.DuckDBPyConnection) -> None:
     assert m.sql == 'CREATE OR REPLACE MACRO "add2"("a", "b" := 2) AS ("a" + "b")'
     m.execute(db)
     assert select(func.add2(1), func.add2(1, 5)).execute(db).fetchall() == [(3, 6)]
-    create_macro("first_n", lambda n: select().from_(TF.range(n))).execute(db)
+    create_macro("first_n", lambda n: select().from_(fn.table.range(n))).execute(db)
     assert select().from_(func.first_n(2)).execute(db).fetchall() == [(0,), (1,)]
     create_macro("ov", lambda a: a, lambda a, b: a * b).execute(db)
     assert select(func.ov(3), func.ov(3, 4)).execute(db).fetchall() == [(3, 12)]
@@ -371,10 +373,10 @@ def test_macros(db: duckdb.DuckDBPyConnection) -> None:
 
 def test_alter_table(db: duckdb.DuckDBPyConnection) -> None:
     alt = alter_table(T)
-    alt.add_column("extra", dt.INTEGER, default=7, if_not_exists=True).execute(db)
+    alt.add_column("extra", qlt.Integer, default=7, if_not_exists=True).execute(db)
     assert select(col("extra")).from_(T).limit(1).execute(db).fetchall() == [(7,)]
     alt.rename_column("extra", "more").execute(db)
-    alt.alter_type("more", dt.BIGINT, using=col("more") * 2).execute(db)
+    alt.alter_type("more", qlt.BigInt, using=col("more") * 2).execute(db)
     assert select(col("more")).from_(T).limit(1).execute(db).fetchall() == [(14,)]
     alt.set_default("more", 1).execute(db)
     alt.drop_default("more").execute(db)
@@ -397,7 +399,7 @@ def test_comments(db: duckdb.DuckDBPyConnection) -> None:
 
 def test_introspection(db: duckdb.DuckDBPyConnection) -> None:
     assert describe(T).execute(db).fetchall()[0][:2] == ("id", "INTEGER")
-    assert describe(select(T.v.cast(dt.BIGINT).as_("x")).from_(T)).execute(db).fetchall()[0][:2] == ("x", "BIGINT")
+    assert describe(select(T.v.cast(qlt.BigInt).as_("x")).from_(T)).execute(db).fetchall()[0][:2] == ("x", "BIGINT")
     assert summarize(T).execute(db).fetchall()[0][0] == "id"
     assert ("t",) in show_tables().execute(db).fetchall()
 
@@ -413,8 +415,32 @@ def test_attach_use_settings(db: duckdb.DuckDBPyConnection, tmp_path: Path) -> N
     set_("threads", 2).execute(db)
     assert db.execute("SELECT current_setting('threads')").fetchall() == [(2,)]
     set_variable("limit_v", 25).execute(db)
-    assert select(T.id).from_(T).where(T.v > F.getvariable("limit_v")).execute(db).fetchall() == [(3,)]
+    assert select(T.id).from_(T).where(T.v > fn.getvariable("limit_v")).execute(db).fetchall() == [(3,)]
     assert pragma("table_info", "t").execute(db).fetchall()[0][1] == "id"
+
+
+def test_attach_with_type(db: duckdb.DuckDBPyConnection, tmp_path: Path) -> None:
+    path = (tmp_path / "typed.db").as_posix()
+    stmt = attach(path, "typed", type="duckdb", if_not_exists=True)
+    assert stmt.sql == f"ATTACH IF NOT EXISTS '{path}' AS \"typed\" (TYPE duckdb)"
+    stmt.execute(db)
+    assert ("typed",) in [(r[0],) for r in show_databases().execute(db).fetchall()]
+    detach("typed").execute(db)
+    with pytest.raises(ValueError, match="Invalid"):
+        attach(path, type="duckdb); DROP TABLE t")
+
+
+def test_create_secret(db: duckdb.DuckDBPyConnection) -> None:
+    stmt = create_secret("s", type="s3", key_id="AKIA", secret="x'y", region="ap-northeast-1")
+    assert stmt.sql == "CREATE SECRET \"s\" (TYPE s3, KEY_ID 'AKIA', SECRET 'x''y', REGION 'ap-northeast-1')"
+    stmt.execute(db)
+    assert db.execute("SELECT name, type FROM duckdb_secrets()").fetchall() == [("s", "s3")]
+    drop_secret("s").execute(db)
+    assert create_secret(type="s3", persistent=True, storage="local_file").sql == (
+        'CREATE PERSISTENT SECRET IN "local_file" (TYPE s3)'
+    )
+    with pytest.raises(ValueError, match="Invalid secret type"):
+        create_secret("s", type="s3) (x")
 
 
 def test_from_first_with_new_sources(db: duckdb.DuckDBPyConnection) -> None:

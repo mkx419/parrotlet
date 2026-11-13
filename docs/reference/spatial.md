@@ -1,6 +1,6 @@
 # 関数（spatial）
 
-`from parrotlet.functions import spatial as ST`。spatial 拡張の関数です（拡張機能は自動で読み込まれます）。
+`import parrotlet.functions as fn` のあと `fn.spatial` で使います。spatial 拡張の関数です（拡張機能は自動で読み込まれます）。
 
 ::: parrotlet.functions.spatial
     options:

@@ -4,16 +4,19 @@ from __future__ import annotations
 
 from collections.abc import Sequence
 from dataclasses import dataclass, replace
-from typing import TYPE_CHECKING, Any, Literal, override
+from typing import TYPE_CHECKING, Any, override
 
-from parrotlet.expr import Expr, NullsOrder, to_expr
+from parrotlet.expr import Expr, to_expr
 from parrotlet.query import Node, Query, concat, join, quote_ident, unqualified_columns
-from parrotlet.source import CTE, to_from_item
-from parrotlet.statement.base import ColumnInput, FromInput, Statement, Value, to_columns, with_clause
+from parrotlet.source import to_from_item
+from parrotlet.statement.base import ColumnInput, FromInput, Statement, Value, list_clause, to_columns, with_clause
 from parrotlet.statement.select import QueryStatement
 
 if TYPE_CHECKING:
-    from parrotlet.database import Database
+    pass
+
+
+# region PIVOT
 
 
 def _source(value: FromInput | Statement) -> Query:
@@ -46,14 +49,6 @@ class Pivot(QueryStatement):
     _on: tuple[PivotOn, ...] = ()
     _using: tuple[Node, ...] = ()
     _group_by: tuple[Node, ...] = ()
-    _ctes: tuple[CTE, ...] = ()
-    _recursive: bool = False
-    _order_by: tuple[Node, ...] | Literal["ALL"] = ()
-    _order_all: tuple[bool, NullsOrder | None] = (False, None)
-    _limit: Expr[Any] | None = None
-    _limit_percent: bool = False
-    _offset: Expr[Any] | None = None
-    _db: Database | None = None
 
     def on(self, column: ColumnInput, values: Sequence[Value] | None = None) -> Pivot:
         """Pivot on `column` (one output column per value); call repeatedly for several ON columns."""
@@ -62,7 +57,7 @@ class Pivot(QueryStatement):
         return replace(self, _on=(*self._on, PivotOn(node, vals)))
 
     def using(self, *aggregates: ColumnInput) -> Pivot:
-        """Aggregates for the cells, e.g. `F.sum(t.v)` or `F.sum(t.v).as_("total")`."""
+        """Aggregates for the cells, e.g. `fn.sum(t.v)` or `fn.sum(t.v).as_("total")`."""
         return replace(self, _using=(*self._using, *to_columns(aggregates)))
 
     def group_by(self, *columns: ColumnInput) -> Pivot:
@@ -76,11 +71,17 @@ class Pivot(QueryStatement):
             body = concat(
                 " ON ",
                 join(", ", self._on),
-                concat(" USING ", join(", ", self._using)) if self._using else None,
-                concat(" GROUP BY ", join(", ", self._group_by)) if self._group_by else None,
+                list_clause("USING", self._using),
+                list_clause("GROUP BY", self._group_by),
                 self._tail(),
             )
         return concat(with_clause(self._ctes, recursive=self._recursive), "PIVOT ", _source(self._source), body)
+
+
+# endregion
+
+
+# region UNPIVOT
 
 
 @dataclass(frozen=True, slots=True, eq=False)
@@ -91,14 +92,6 @@ class Unpivot(QueryStatement):
     _on: tuple[Node, ...] = ()
     _name: str = "name"
     _value: tuple[str, ...] = ("value",)
-    _ctes: tuple[CTE, ...] = ()
-    _recursive: bool = False
-    _order_by: tuple[Node, ...] | Literal["ALL"] = ()
-    _order_all: tuple[bool, NullsOrder | None] = (False, None)
-    _limit: Expr[Any] | None = None
-    _limit_percent: bool = False
-    _offset: Expr[Any] | None = None
-    _db: Database | None = None
 
     def on(self, *columns: ColumnInput) -> Unpivot:
         return replace(self, _on=(*self._on, *to_columns(columns)))
@@ -123,11 +116,20 @@ class Unpivot(QueryStatement):
         )
 
 
+# endregion
+
+
+# region Entry points
+
+
 def pivot(source: FromInput | Statement) -> Pivot:
-    """Start a PIVOT: `pivot(Sales).on(Sales.month).using(F.sum(Sales.amount)).group_by(Sales.region)`."""
+    """Start a PIVOT: `pivot(Sales).on(Sales.month).using(fn.sum(Sales.amount)).group_by(Sales.region)`."""
     return Pivot(source)
 
 
 def unpivot(source: FromInput | Statement) -> Unpivot:
     """Start an UNPIVOT: `unpivot(Wide).on(columns("m_.*")).into(name="month", value="amount")`."""
     return Unpivot(source)
+
+
+# endregion

@@ -1,8 +1,8 @@
 # テーブル関数
 
-`from parrotlet.functions import tables as TF`。FROM で使うテーブル関数です。
+`import parrotlet.functions as fn` のあと `fn.table` で使います。FROM で使うテーブル関数です。
 
-::: parrotlet.functions.tables
+::: parrotlet.functions.table
     options:
       show_root_heading: false
       heading_level: 3

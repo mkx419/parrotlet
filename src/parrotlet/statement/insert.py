@@ -6,23 +6,25 @@ from typing import TYPE_CHECKING, Any, Literal, override
 
 from parrotlet.expr import Bool, ColumnRef, Expr, to_expr
 from parrotlet.model import Model
-from parrotlet.query import Node, Query, concat, join, quote_ident
-from parrotlet.source import CTE, Table, TableLike, to_table
+from parrotlet.query import Node, Query, concat, ident_list, join
+from parrotlet.source import Table, TableLike, to_table
 from parrotlet.statement.base import (
-    ColumnInput,
-    Statement,
+    DmlStatement,
     Value,
     and_where,
     assignments,
-    column_name,
+    clause,
+    column_names,
     render_assignments,
     returning_clause,
-    to_columns,
     with_clause,
 )
 
 if TYPE_CHECKING:
-    from parrotlet.database import Database
+    pass
+
+
+# region ON CONFLICT
 
 
 @dataclass(frozen=True, slots=True, eq=False)
@@ -34,18 +36,24 @@ class OnConflict(Node):
 
     @override
     def build(self) -> Query:
-        target = (" (" + ", ".join(quote_ident(c) for c in self.target) + ")") if self.target else ""
+        target = (" " + ident_list(self.target)) if self.target else ""
         if self.action == "NOTHING":
             return Query(f" ON CONFLICT{target} DO NOTHING")
         return concat(
             Query(f" ON CONFLICT{target} DO UPDATE SET "),
             render_assignments(self.set_),
-            concat(" WHERE ", self.where) if self.where is not None else None,
+            clause("WHERE", self.where),
         )
 
 
+# endregion
+
+
+# region INSERT
+
+
 @dataclass(frozen=True, slots=True, eq=False)
-class Insert(Statement):
+class Insert(DmlStatement):
     _table: Table
     _columns: tuple[str, ...] = ()
     _rows: tuple[tuple[Expr[Any], ...], ...] = ()
@@ -54,12 +62,10 @@ class Insert(Statement):
     _by: Literal["NAME", "POSITION"] | None = None
     _or: Literal["REPLACE", "IGNORE"] | None = None
     _conflict: OnConflict | None = None
-    _returning: tuple[Node, ...] = ()
-    _ctes: tuple[CTE, ...] = ()
-    _db: Database | None = None
 
+    # region source rows
     def columns(self, *names: str | ColumnRef) -> Insert:
-        return replace(self, _columns=tuple(column_name(n) for n in names))
+        return replace(self, _columns=column_names(names))
 
     def values(self, *rows: Sequence[Value] | Mapping[str, Value] | Model) -> Insert:
         """Add rows as sequences (matching `.columns()`), dicts (column name → value) or Model instances."""
@@ -93,6 +99,9 @@ class Insert(Statement):
     def default_values(self) -> Insert:
         return replace(self, _default_values=True, _rows=(), _query=None)
 
+    # endregion
+
+    # region DuckDB modifiers
     def by_name(self) -> Insert:
         """DuckDB `INSERT INTO t BY NAME SELECT ...`: match columns by name instead of position."""
         return replace(self, _by="NAME")
@@ -109,8 +118,11 @@ class Insert(Statement):
         """DuckDB `INSERT OR IGNORE`."""
         return replace(self, _or="IGNORE")
 
+    # endregion
+
+    # region ON CONFLICT
     def on_conflict_do_nothing(self, *target: str | ColumnRef) -> Insert:
-        return replace(self, _conflict=OnConflict(tuple(column_name(c) for c in target), "NOTHING"))
+        return replace(self, _conflict=OnConflict(column_names(target), "NOTHING"))
 
     def on_conflict_do_update(
         self,
@@ -128,19 +140,16 @@ class Insert(Statement):
         return replace(
             self,
             _conflict=OnConflict(
-                tuple(column_name(c) for c in targets),
+                column_names(targets),
                 "UPDATE",
                 pairs,
                 and_where(None, (where,) if where is not None else ()),
             ),
         )
 
-    def returning(self, *items: ColumnInput) -> Insert:
-        return replace(self, _returning=(*self._returning, *to_columns(items)))
+    # endregion
 
-    def with_(self, *ctes: CTE) -> Insert:
-        return replace(self, _ctes=(*self._ctes, *ctes))
-
+    # region rendering
     @override
     def build(self) -> Query:
         if self._rows:
@@ -152,23 +161,26 @@ class Insert(Statement):
         else:
             raise ValueError("INSERT needs .values(), .select() or .default_values()")
 
-        columns = (" (" + ", ".join(quote_ident(c) for c in self._columns) + ")") if self._columns else ""
         return concat(
             with_clause(self._ctes, recursive=False),
             Query("INSERT" + (f" OR {self._or}" if self._or else "") + " INTO "),
             self._table.ref(),
             Query(f" BY {self._by}") if self._by else None,
-            Query(columns),
+            Query(" " + ident_list(self._columns)) if self._columns else None,
             source,
             self._conflict,
             returning_clause(self._returning),
         )
 
+    # endregion
+
 
 def insert(table: TableLike, columns: Sequence[str | ColumnRef] = ()) -> Insert:
     """`INSERT INTO table [(columns)] ...`"""
-    return Insert(to_table(table), tuple(column_name(c) for c in columns))
+    return Insert(to_table(table), column_names(columns))
 
 
 excluded = Table("excluded")
 """The proposed row in `ON CONFLICT DO UPDATE`: `excluded.c.price`."""
+
+# endregion

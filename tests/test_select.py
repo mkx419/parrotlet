@@ -184,6 +184,17 @@ def test_set_operations(con: duckdb.DuckDBPyConnection) -> None:
     assert len(chained.execute(con).fetchall()) == 6
 
 
+def test_set_operation_on_limited_compound(con: duckdb.DuckDBPyConnection) -> None:
+    a = select(u.id).from_(users).where(u.id <= 3)
+    b = select(u.id).from_(users).where(u.id >= 3)
+    limited = a.union(b).order_by("id").limit(2)
+    q = limited.union(select(99))  # the LIMIT must stay on the inner compound, not chain onto it
+    assert q.sql.startswith("((SELECT")
+    assert sorted(q.execute(con).fetchall()) == [(1,), (2,), (99,)]
+    offset_only = a.union(b).order_by("id").offset(4).union_all(select(99))
+    assert sorted(offset_only.execute(con).fetchall()) == [(5,), (99,)]
+
+
 def test_union_by_name(con: duckdb.DuckDBPyConnection) -> None:
     x = select(lit(1).as_("a"), lit(2).as_("b"))
     y = select(lit(3).as_("b"), lit(4).as_("a"))

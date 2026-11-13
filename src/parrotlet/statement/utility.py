@@ -3,19 +3,16 @@ VACUUM, ANALYZE, EXPORT/IMPORT DATABASE, INSTALL/LOAD, CALL and transactions."""
 
 from __future__ import annotations
 
-import re
 from typing import Any, Literal
 
 from parrotlet.expr import Expr, PyScalar, to_expr
-from parrotlet.query import Query, concat, quote_ident, render_literal
+from parrotlet.query import PathLike, Query, concat, is_identifier, path_str, quote_ident, render_literal
 from parrotlet.source import TableLike, to_table
 from parrotlet.statement.base import ObjectName, OptionValue, SimpleStatement, Statement, object_name, render_options
 
-_SETTING = re.compile(r"[A-Za-z_][A-Za-z0-9_]*")
-
 
 def _setting(name: str) -> str:
-    if not _SETTING.fullmatch(name):
+    if not is_identifier(name):
         raise ValueError(f"Invalid setting / pragma / extension name: {name!r}")
     return name
 
@@ -24,7 +21,7 @@ def _target(target: TableLike | Statement) -> Query:
     return target.build() if isinstance(target, Statement) else to_table(target).ref()
 
 
-# introspection --------------------------------------------------------------------------------------------------------
+# region introspection
 
 
 def describe(target: TableLike | Statement) -> SimpleStatement:
@@ -53,11 +50,14 @@ def explain(statement: Statement, *, analyze: bool = False) -> SimpleStatement:
     return SimpleStatement((Query("EXPLAIN ANALYZE " if analyze else "EXPLAIN "), statement))
 
 
-# databases ------------------------------------------------------------------------------------------------------------
+# endregion
+
+
+# region databases
 
 
 def attach(
-    path: str,
+    path: PathLike,
     alias: str | None = None,
     *,
     read_only: bool | None = None,
@@ -78,7 +78,7 @@ def attach(
     opts.update(options)
     return SimpleStatement(
         (
-            Query(head + render_literal(path)),
+            Query(head + render_literal(path_str(path))),
             Query(f" AS {quote_ident(alias)}") if alias else None,
             render_options(opts),
         ),
@@ -94,13 +94,13 @@ def use(name: ObjectName) -> SimpleStatement:
     return SimpleStatement((Query("USE "), object_name(name)))
 
 
-def export_database(path: str, **options: OptionValue) -> SimpleStatement:
+def export_database(path: PathLike, **options: OptionValue) -> SimpleStatement:
     """`EXPORT DATABASE 'dir' (FORMAT parquet, ...)`."""
-    return SimpleStatement((Query(f"EXPORT DATABASE {render_literal(path)}"), render_options(options)))
+    return SimpleStatement((Query(f"EXPORT DATABASE {render_literal(path_str(path))}"), render_options(options)))
 
 
-def import_database(path: str) -> SimpleStatement:
-    return SimpleStatement((Query(f"IMPORT DATABASE {render_literal(path)}"),))
+def import_database(path: PathLike) -> SimpleStatement:
+    return SimpleStatement((Query(f"IMPORT DATABASE {render_literal(path_str(path))}"),))
 
 
 def checkpoint(database: str | None = None, *, force: bool = False) -> SimpleStatement:
@@ -108,33 +108,42 @@ def checkpoint(database: str | None = None, *, force: bool = False) -> SimpleSta
     return SimpleStatement((Query(sql),))
 
 
+def _optional_table(table: TableLike | None) -> Query | None:
+    return concat(" ", to_table(table).ref()) if table is not None else None
+
+
 def vacuum(table: TableLike | None = None, *, analyze: bool = False) -> SimpleStatement:
-    head = Query("VACUUM ANALYZE" if analyze else "VACUUM")
-    return SimpleStatement((head, concat(" ", to_table(table).ref()) if table is not None else None))
+    return SimpleStatement((Query("VACUUM ANALYZE" if analyze else "VACUUM"), _optional_table(table)))
 
 
 def analyze(table: TableLike | None = None) -> SimpleStatement:
-    return SimpleStatement((Query("ANALYZE"), concat(" ", to_table(table).ref()) if table is not None else None))
+    return SimpleStatement((Query("ANALYZE"), _optional_table(table)))
 
 
-# settings -------------------------------------------------------------------------------------------------------------
+# endregion
+
+
+# region settings
 
 type Scope = Literal["global", "session", "local"]
 
 
+def _scoped(name: str, scope: Scope | None) -> str:
+    """`[GLOBAL|SESSION|LOCAL] name`"""
+    return (f"{scope.upper()} " if scope else "") + _setting(name)
+
+
 def set_(name: str, value: PyScalar, *, scope: Scope | None = None) -> SimpleStatement:
     """`SET [GLOBAL|SESSION|LOCAL] name = value`, e.g. `set_("threads", 4)`."""
-    prefix = f"{scope.upper()} " if scope else ""
-    return SimpleStatement((Query(f"SET {prefix}{_setting(name)} = {render_literal(value)}"),))
+    return SimpleStatement((Query(f"SET {_scoped(name, scope)} = {render_literal(value)}"),))
 
 
 def reset(name: str, *, scope: Scope | None = None) -> SimpleStatement:
-    prefix = f"{scope.upper()} " if scope else ""
-    return SimpleStatement((Query(f"RESET {prefix}{_setting(name)}"),))
+    return SimpleStatement((Query(f"RESET {_scoped(name, scope)}"),))
 
 
 def set_variable(name: str, value: Expr[Any] | PyScalar) -> SimpleStatement:
-    """`SET VARIABLE name = value`; read it back with `F.getvariable("name")`."""
+    """`SET VARIABLE name = value`; read it back with `fn.getvariable("name")`."""
     return SimpleStatement((Query(f"SET VARIABLE {quote_ident(name)} = "), to_expr(value)), inline=True)
 
 
@@ -154,14 +163,17 @@ def pragma(name: str, *args: PyScalar, value: PyScalar = None) -> SimpleStatemen
     return SimpleStatement((Query(sql),))
 
 
-# extensions -----------------------------------------------------------------------------------------------------------
+# endregion
+
+
+# region extensions
 
 
 def install(extension: str, *, from_: str | None = None, force: bool = False) -> SimpleStatement:
     """`[FORCE] INSTALL ext [FROM community|'url']`."""
     sql = ("FORCE INSTALL " if force else "INSTALL ") + _setting(extension)
     if from_ is not None:
-        sql += " FROM " + (from_ if _SETTING.fullmatch(from_) else render_literal(from_))
+        sql += " FROM " + (from_ if is_identifier(from_) else render_literal(from_))
     return SimpleStatement((Query(sql),))
 
 
@@ -169,7 +181,10 @@ def load(extension: str) -> SimpleStatement:
     return SimpleStatement((Query(f"LOAD {_setting(extension)}"),))
 
 
-# misc -----------------------------------------------------------------------------------------------------------------
+# endregion
+
+
+# region misc
 
 
 def call(function: Expr[Any]) -> SimpleStatement:
@@ -187,3 +202,6 @@ def commit() -> SimpleStatement:
 
 def rollback() -> SimpleStatement:
     return SimpleStatement((Query("ROLLBACK"),))
+
+
+# endregion

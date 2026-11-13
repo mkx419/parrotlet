@@ -15,12 +15,13 @@ from uuid import UUID as _UUID
 
 from shapely.geometry.base import BaseGeometry as _Geom
 
-from parrotlet import sqltypes as _t
+from parrotlet import type as _t
 from parrotlet.expr import AggregateFunc as _A, Expr as _E, Func as _F, WindowFunc as _W
 from parrotlet.functions import _runtime as _rt
 from parrotlet.functions._runtime import (
     LambdaArg as _LambdaArg,
     OrderBy as _OrderBy,
+    PathLike as _PathLike,
     PyDict as _PyDict,
     PyList as _PyList,
     PyScalar as _PyScalar,
@@ -959,6 +960,9 @@ __all__ = [
 ]
 
 
+# region A
+
+
 @_overload
 def abs(x: _E[_t.UTinyInt], /) -> _F[_t.UTinyInt]: ...
 @_overload
@@ -1676,6 +1680,12 @@ def avg(*args: _Any, distinct: bool = False, order_by: _OrderBy = None) -> _A[_A
     return _rt.aggregate("avg", args, distinct, order_by)
 
 
+# endregion
+
+
+# region B
+
+
 @_overload
 def bar(
     x: _E[_t.Double] | int | float | _PyDecimal,
@@ -2035,6 +2045,12 @@ def bool_or(arg: _E[_t.Boolean] | bool, /, *, distinct: bool = False, order_by: 
 
     SQL: `bool_or`"""
     return _rt.aggregate("bool_or", (arg,), distinct, order_by)
+
+
+# endregion
+
+
+# region C
 
 
 def can_cast_implicitly(source_type: _Value, target_type: _Value, /) -> _F[_t.Boolean]:
@@ -3105,6 +3121,12 @@ def currval(sequence_name: _E[_t.Varchar] | str, /) -> _F[_t.BigInt]:
     return _rt.scalar("currval", (sequence_name,))
 
 
+# endregion
+
+
+# region D
+
+
 def damerau_levenshtein(s1: _E[_t.Varchar] | str, s2: _E[_t.Varchar] | str, /) -> _F[_t.BigInt]:
     """Extension of Levenshtein distance to also include transposition of adjacent characters as an allowed edit operation. In other words, the minimum number of edit operations (insertions, deletions, substitutions or transpositions) required to change one string to another. Characters of different cases (e.g., `a` and `A`) are considered different.
 
@@ -3535,6 +3557,12 @@ def divide(*args: _Any) -> _F[_Any]:
     return _rt.scalar("divide", args)
 
 
+# endregion
+
+
+# region E
+
+
 def encode(string: _E[_t.Varchar] | str, /) -> _F[_t.Blob]:
     """Converts the `string` to `BLOB`. Converts UTF-8 characters into literal encoding.
 
@@ -3775,6 +3803,12 @@ def exp(x: _E[_t.Double] | int | float | _PyDecimal, /) -> _F[_t.Double]:
     return _rt.scalar("exp", (x,))
 
 
+# endregion
+
+
+# region F
+
+
 def factorial(x: _E[_t.Integer] | int, /) -> _F[_t.HugeInt]:
     """Factorial of x. Computes the product of the current integer and all integers below it
 
@@ -3908,6 +3942,12 @@ def from_json_strict(json: _E[_t.Varchar] | str, structure: _E[_t.Varchar] | str
     return _rt.scalar("from_json_strict", (json, structure))
 
 
+# endregion
+
+
+# region G
+
+
 def gamma(x: _E[_t.Double] | int | float | _PyDecimal, /) -> _F[_t.Double]:
     """Interpolation of (x-1) factorial (so decimal inputs are allowed)
 
@@ -4010,6 +4050,12 @@ def greatest_common_divisor(*args: _Any) -> _F[_Any]:
 
     SQL: `greatest_common_divisor`"""
     return _rt.scalar("greatest_common_divisor", args)
+
+
+# endregion
+
+
+# region H
 
 
 def hamming(s1: _E[_t.Varchar] | str, s2: _E[_t.Varchar] | str, /) -> _F[_t.BigInt]:
@@ -4208,6 +4254,12 @@ def hour(*args: _Any) -> _F[_Any]:
 
     SQL: `hour`"""
     return _rt.scalar("hour", args)
+
+
+# endregion
+
+
+# region I
 
 
 def icu_collate_aa(str: _E[_t.Varchar] | str, /) -> _F[_t.Varchar]:
@@ -5081,6 +5133,12 @@ def isoyear(*args: _Any) -> _F[_Any]:
     return _rt.scalar("isoyear", args)
 
 
+# endregion
+
+
+# region J
+
+
 def jaccard(s1: _E[_t.Varchar] | str, s2: _E[_t.Varchar] | str, /) -> _F[_t.Double]:
     """The Jaccard similarity between two strings. Characters of different cases (e.g., `a` and `A`) are considered different. Returns a number between 0 and 1.
 
@@ -5410,6 +5468,12 @@ def julian(*args: _Any) -> _F[_Any]:
     return _rt.scalar("julian", args)
 
 
+# endregion
+
+
+# region K
+
+
 def kahan_sum(
     arg: _E[_t.Double] | int | float | _PyDecimal, /, *, distinct: bool = False, order_by: _OrderBy = None
 ) -> _A[_t.Double]:
@@ -5437,6 +5501,12 @@ def kurtosis_pop(
 
     SQL: `kurtosis_pop`"""
     return _rt.aggregate("kurtosis_pop", (x,), distinct, order_by)
+
+
+# endregion
+
+
+# region L
 
 
 @_overload
@@ -6245,6 +6315,12 @@ def lttb(*args: _Any, distinct: bool = False, order_by: _OrderBy = None) -> _A[_
     return _rt.aggregate("lttb", args, distinct, order_by)
 
 
+# endregion
+
+
+# region M
+
+
 @_overload
 def mad(x: _E[_t.Date] | _dt.date, /, *, distinct: bool = False, order_by: _OrderBy = None) -> _A[_t.Interval]: ...
 @_overload
@@ -6723,6 +6799,12 @@ def multiply(*args: _Any) -> _F[_Any]:
     return _rt.scalar("multiply", args)
 
 
+# endregion
+
+
+# region N
+
+
 @_overload
 def nanosecond(tsns: _E[_t.Date] | _dt.date, /) -> _F[_t.BigInt]: ...
 @_overload
@@ -6836,6 +6918,12 @@ def ntile(
     return _rt.window("ntile", (num_buckets,), ignore_nulls, order_by)
 
 
+# endregion
+
+
+# region O
+
+
 def obj_description(object_oid: _Value, catalog_name: _Value, /) -> _F[_Any]:
     """SQL: `obj_description`"""
     return _rt.scalar("obj_description", (object_oid, catalog_name))
@@ -6873,6 +6961,12 @@ def overlay(*args: _Any) -> _F[_Any]:
 
     SQL: `overlay`"""
     return _rt.scalar("overlay", args)
+
+
+# endregion
+
+
+# region P
 
 
 @_overload
@@ -7146,6 +7240,12 @@ def product(
 
     SQL: `product`"""
     return _rt.aggregate("product", (arg,), distinct, order_by)
+
+
+# endregion
+
+
+# region Q
 
 
 @_overload
@@ -7448,6 +7548,12 @@ def quarter(*args: _Any) -> _F[_Any]:
 
     SQL: `quarter`"""
     return _rt.scalar("quarter", args)
+
+
+# endregion
+
+
+# region R
 
 
 def radians(x: _E[_t.Double] | int | float | _PyDecimal, /) -> _F[_t.Double]:
@@ -8126,6 +8232,12 @@ def rtrim(*args: _Any) -> _F[_Any]:
 
     SQL: `rtrim`"""
     return _rt.scalar("rtrim", args)
+
+
+# endregion
+
+
+# region S
 
 
 @_overload
@@ -8914,6 +9026,12 @@ def switch(*args: _Any) -> _F[_Any]:
     return _rt.scalar("switch", args)
 
 
+# endregion
+
+
+# region T
+
+
 def tan(x: _E[_t.Double] | int | float | _PyDecimal, /) -> _F[_t.Double]:
     """Computes the tan of x
 
@@ -9428,6 +9546,12 @@ def typeof(expression: _Value, /) -> _F[_t.Varchar]:
     return _rt.scalar("typeof", (expression,))
 
 
+# endregion
+
+
+# region U
+
+
 def unbin(value: _E[_t.Varchar] | str, /) -> _F[_t.Blob]:
     """Converts a `value` from binary representation to a blob.
 
@@ -9566,6 +9690,12 @@ def uuidv_7() -> _F[_t.Uuid]:
 
     SQL: `uuidv7`"""
     return _rt.scalar("uuidv7", ())
+
+
+# endregion
+
+
+# region V
 
 
 def var_pop(
@@ -9743,6 +9873,12 @@ def vertex_extract(geom: _E[_t.Geometry] | _Geom, coordinate: _E[_t.Varchar] | s
     return _rt.scalar("vertex_extract", (geom, coordinate))
 
 
+# endregion
+
+
+# region W
+
+
 def wavg(value: _Value, weight: _Value, /) -> _F[_Any]:
     """SQL: `wavg`"""
     return _rt.scalar("wavg", (value, weight))
@@ -9813,6 +9949,12 @@ def write_log(string: _E[_t.Varchar] | str, /, *args: _Value) -> _F[_Any]:
     return _rt.scalar("write_log", (string, *args))
 
 
+# endregion
+
+
+# region X
+
+
 @_overload
 def xor(left: _E[_t.UTinyInt], right: _E[_t.UTinyInt], /) -> _F[_t.UTinyInt]: ...
 @_overload
@@ -9842,6 +9984,12 @@ def xor(*args: _Any) -> _F[_Any]:
 
     SQL: `xor`"""
     return _rt.scalar("xor", args)
+
+
+# endregion
+
+
+# region Y
 
 
 @_overload
@@ -9878,7 +10026,12 @@ def yearweek(*args: _Any) -> _F[_Any]:
     return _rt.scalar("yearweek", args)
 
 
-# aliases
+# endregion
+
+
+# region aliases
+
+
 aggregate = list_aggregate
 array_agg = list
 array_aggr = list_aggregate
@@ -9957,3 +10110,6 @@ to_hex = hex
 transaction_timestamp = get_current_timestamp
 ucase = upper
 variance = var_samp
+
+
+# endregion

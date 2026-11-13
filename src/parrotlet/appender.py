@@ -10,6 +10,7 @@ from shapely.geometry.base import BaseGeometry
 from parrotlet.expr import ColumnRef, Keyword
 from parrotlet.model import Model
 from parrotlet.source import TableLike, model_table, to_table
+from parrotlet.statement.base import column_name
 
 if TYPE_CHECKING:
     from types import TracebackType
@@ -20,10 +21,6 @@ if TYPE_CHECKING:
 
 type AppendAction = Literal["insert", "upsert", "update", "delete"]
 type ColumnName = str | ColumnRef[Any]
-
-
-def _name(column: ColumnName) -> str:
-    return column if isinstance(column, str) else column.name
 
 
 def _convert(value: object) -> object:
@@ -54,7 +51,7 @@ class Appender[R]:
 
     Rows may be Model instances (for a Model target), mappings (column name → value) or sequences (in `columns`
     order). For a Model target, `columns` defaults to the columns that hold values: generated columns and columns with a
-    database-side default (`column(default=F.now())`) are left out so that DuckDB fills them in. `key` defaults to the
+    database-side default (`column(default=fn.now())`) are left out so that DuckDB fills them in. `key` defaults to the
     primary key. `batch_size` flushes automatically every that many rows.
     """
 
@@ -78,11 +75,11 @@ class Appender[R]:
         if key is None and self.model is not None and action in ("update", "delete"):
             key_names = [c.name for c in model_columns if c.primary_key]
         else:
-            key_names = [_name(k) for k in key or ()]
+            key_names = [column_name(k) for k in key or ()]
         if columns is not None:
-            column_names = [_name(c) for c in columns]
+            column_names = [column_name(c) for c in columns]
         elif self.model is not None:
-            column_names = [c.name for c in model_columns if c.generated is None and not _server_default(c)]
+            column_names = [c.name for c in model_columns if c.generated is None and not c.has_server_default()]
         else:
             column_names = []
 
@@ -90,6 +87,8 @@ class Appender[R]:
             if not key_names:
                 raise ValueError("The delete action needs key columns (key=..., or a Model with a primary key)")
             column_names = key_names  # a delete appender buffers exactly its key columns
+        if action == "upsert" and key_names:
+            raise ValueError("The upsert action matches on the table's primary key / unique constraints; omit key=")
         if action == "update" and not key_names:
             raise ValueError("The update action needs key columns (key=..., or a Model with a primary key)")
 
@@ -98,18 +97,18 @@ class Appender[R]:
         options: dict[str, Any] = {"action": action}
         if action != "delete" and self.columns:
             options["columns"] = list(self.columns)
-        if key_names and action in ("update", "delete", "upsert"):
+        if key_names and action in ("update", "delete"):
             options["key"] = key_names
         self._native = connection.appender(name, **options)
 
-    # rows -----------------------------------------------------------------------------------------------------------
+    # region rows
     def _values(self, row: R | Mapping[str, Any] | Sequence[Any]) -> tuple[object, ...]:
         if isinstance(row, Model):
             data = row.to_row()
             for column in row.__columns__:
                 if (
                     column.name not in self.columns
-                    and _server_default(column)
+                    and column.has_server_default()
                     and not isinstance(data[column.name], Keyword)
                 ):
                     raise ValueError(
@@ -165,8 +164,4 @@ class Appender[R]:
         else:
             self.clear()
 
-
-def _server_default(column: Column[Any]) -> bool:
-    from parrotlet.model import _MISSING
-
-    return column.server_default is not _MISSING
+    # endregion

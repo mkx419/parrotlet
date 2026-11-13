@@ -5,6 +5,8 @@ from decimal import Decimal
 import duckdb
 import pytest
 
+import parrotlet.functions as fn
+import parrotlet.type as qlt
 from parrotlet import (
     Check,
     Column,
@@ -22,37 +24,35 @@ from parrotlet import (
     table,
     update,
 )
-from parrotlet import datatype as dt
-from parrotlet import functions as F
 
 
 class User(Model, table="users"):
     """Matches the `users` table created in conftest."""
 
-    id: Column[int] = column(dt.INTEGER, primary_key=True)
+    id: Column[int] = column(qlt.Integer, primary_key=True)
     name: Column[str | None]
-    age: Column[int | None] = column(dt.INTEGER, default=None)
+    age: Column[int | None] = column(qlt.Integer, default=None)
     dept: Column[str | None] = column(default=None)
 
 
 class Order(Model, table="orders"):
-    id: Column[int] = column(dt.INTEGER)
-    user_id: Column[int] = column(dt.INTEGER, references=User.id)
-    amount: Column[Decimal] = column(dt.DECIMAL(10, 2))
+    id: Column[int] = column(qlt.Integer)
+    user_id: Column[int] = column(qlt.Integer, references=User.id)
+    amount: Column[Decimal] = column(qlt.Decimal(10, 2))
     ts: Column[datetime.datetime]
 
 
 class Item(Model, table="items", schema="main"):
-    id: Column[int] = column(dt.INTEGER, primary_key=True)
+    id: Column[int] = column(qlt.Integer, primary_key=True)
     name: Column[str] = column(unique=True)
-    price: Column[Decimal] = column(dt.DECIMAL(10, 2), default=Decimal(0), check=lambda c: c.price >= 0)
+    price: Column[Decimal] = column(qlt.Decimal(10, 2), default=Decimal(0), check=lambda c: c.price >= 0)
     tags: Column[list[str]] = column(default_factory=lambda: ["new"], server_default=["new"])
     note: Column[str | None] = column(default="it's")
     created: Column[datetime.datetime] = column(default=datetime.datetime(2026, 1, 1))
-    owner: Column[int | None] = column(dt.INTEGER, references="users.id", default=None)
+    owner: Column[int | None] = column(qlt.Integer, references="users.id", default=None)
     type_: Column[str | None] = column(name="type", default=None)
     doubled: Column[Decimal | None] = column(
-        dt.DECIMAL(12, 2),
+        qlt.Decimal(12, 2),
         generated=lambda c: c.price * 2,
         init=False,
         default=None,
@@ -62,7 +62,7 @@ class Item(Model, table="items", schema="main"):
 class Pair(Model):
     a: Column[int]
     b: Column[int]
-    user_id: Column[int | None] = column(dt.INTEGER, default=None)
+    user_id: Column[int | None] = column(qlt.Integer, default=None)
 
     @classmethod
     def constraints(cls) -> Sequence[Constraint]:
@@ -81,7 +81,7 @@ class Employee(Model, table="employees"):
 
 
 class Timestamped:
-    created_at: Column[datetime.datetime] = column(default=F.now())
+    created_at: Column[datetime.datetime] = column(default=fn.now())
 
 
 class Base(Model, abstract=True):
@@ -109,11 +109,11 @@ def test_instances_are_rows() -> None:
     u.age = 30
     assert u.to_dict()["age"] == 30
     with pytest.raises(TypeError, match="missing keyword argument 'name'"):
-        User(id=1)  # type: ignore[call-arg]
+        User(id=1)  # type: ignore[call-arg]  # ty: ignore[missing-argument]
     with pytest.raises(TypeError, match="unexpected"):
-        User(id=1, name="a", bogus=1)  # type: ignore[call-arg]
+        User(id=1, name="a", bogus=1)  # type: ignore[call-arg]  # ty: ignore[unknown-argument]
     with pytest.raises(TypeError, match="not an init argument"):
-        Item(id=1, name="x", doubled=Decimal(1))  # type: ignore[call-arg]
+        Item(id=1, name="x", doubled=Decimal(1))  # type: ignore[call-arg]  # ty: ignore[unknown-argument]
     assert Item(id=1, name="x").tags == ["new"]
 
 
@@ -169,7 +169,7 @@ def test_column_named_constraints_is_rejected() -> None:
     with pytest.raises(TypeError, match="constraints_"):
 
         class Bad(Model):
-            constraints: Column[int]  # pyright: ignore[reportIncompatibleMethodOverride]
+            constraints: Column[int]  # pyright: ignore[reportIncompatibleMethodOverride]  # ty: ignore[invalid-attribute-override]
 
     class Ok(Model):
         constraints_: Column[int] = column(name="constraints")
@@ -215,7 +215,7 @@ def test_create_table_from_model(con: duckdb.DuckDBPyConnection) -> None:
 def test_fetch_instances(con: duckdb.DuckDBPyConnection) -> None:
     create_table(Item).execute(con)
     insert(Item, ["id", "name"]).values((1, "n1"), (2, "n2")).execute(con)
-    rows = select(Item).from_(Item).order_by(Item.id).fetch(Item, con)
+    rows = select(Item).from_(Item).order_by(Item.id).fetch_as(Item, con)
     assert [r.name for r in rows] == ["n1", "n2"]
     assert rows[0].doubled == 0
     assert isinstance(rows[0], Item)
@@ -253,7 +253,7 @@ def test_self_reference_and_aliased(con: duckdb.DuckDBPyConnection) -> None:
     insert(Employee).values(Employee(id=1, name="boss")).execute(con)
     insert(Employee).values(Employee(id=2, name="worker", boss_id=1)).execute(con)
 
-    Boss = aliased(Employee, "boss")
+    Boss = aliased(Employee, "boss")  # noqa: N806 - a class (PEP 8: CapWords)
     assert Boss.id.sql == '"boss"."id"'
     q = select(Employee.name, Boss.name.as_("boss")).from_(Employee).join(Boss, Employee.boss_id == Boss.id)
     assert ' INNER JOIN "employees" AS "boss" ON ' in q.sql
@@ -270,13 +270,13 @@ def test_abstract_base_mixin_and_server_default(con: duckdb.DuckDBPyConnection) 
     create_table(Note).execute(con)
     note = Note(id=1, body="hi")
     insert(Note).values(note).execute(con)  # created_at is filled in by the database (DEFAULT)
-    (row,) = select(Note).from_(Note).fetch(Note, con)
+    (row,) = select(Note).from_(Note).fetch_as(Note, con)
     assert isinstance(row.created_at, datetime.datetime)
 
 
 def test_queries_with_models(con: duckdb.DuckDBPyConnection) -> None:
     q = (
-        select(User.name, F.sum(Order.amount).as_("total"))
+        select(User.name, fn.sum(Order.amount).as_("total"))
         .from_(User)
         .join(Order, User.id == Order.user_id)
         .where(User.dept == "eng")
@@ -285,7 +285,7 @@ def test_queries_with_models(con: duckdb.DuckDBPyConnection) -> None:
     )
     assert [(n, float(t)) for n, t in q.execute(con).fetchall()] == [("alice", 150.5), ("bob", 20.0)]
     assert select(User).from_(User).where(User.id == 1).sql == 'SELECT "users".* FROM "users" WHERE ("users"."id" = ?)'
-    assert select(User).from_(User).where(User.id == 1).fetch(User, con) == [
+    assert select(User).from_(User).where(User.id == 1).fetch_as(User, con) == [
         User(id=1, name="alice", age=30, dept="eng"),
     ]
 
@@ -311,10 +311,10 @@ def test_create_table_as_and_validation(con: duckdb.DuckDBPyConnection) -> None:
 
 def test_explicit_complex_types(con: duckdb.DuckDBPyConnection) -> None:
     class Complex(Model):
-        s: Column[dict[str, object]] = column(dt.STRUCT(x=dt.INTEGER, y="VARCHAR"))
+        s: Column[dict[str, object]] = column(qlt.Struct(x=qlt.Integer, y="VARCHAR"))
         m: Column[dict[str, float]]
-        e: Column[str] = column(dt.ENUM("a", "b"))
-        arr: Column[list[float]] = column(dt.ARRAY(dt.FLOAT, 3))
+        e: Column[str] = column(qlt.Enum("a", "b"))
+        arr: Column[list[float]] = column(qlt.Array(qlt.Float, 3))
 
     q = create_table(Complex).temporary()
     assert q.sql.startswith('CREATE TEMPORARY TABLE "complex" ("s" STRUCT("x" INTEGER, "y" VARCHAR) NOT NULL, ')
@@ -330,6 +330,6 @@ def test_table_of_model(con: duckdb.DuckDBPyConnection) -> None:
     u = table(User, alias="u")
     assert u.c.name.sql == '"u"."name"'
     assert select(u.c.name).from_(u).where(u.c.id == 2).fetchall(con) == [("bob",)]
-    assert select(F.count()).from_(table(User).tablesample(rows=2)).fetchall(con) == [(2,)]
+    assert select(fn.count()).from_(table(User).tablesample(rows=2)).fetchall(con) == [(2,)]
     with pytest.raises(TypeError, match="not a Model"):
-        table(int)  # type: ignore[call-overload]
+        table(int)  # type: ignore[call-overload]  # ty: ignore[no-matching-overload]

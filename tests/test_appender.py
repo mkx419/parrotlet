@@ -6,8 +6,8 @@ import pytest
 from shapely.geometry import Point
 from shapely.geometry.base import BaseGeometry
 
+import parrotlet.functions as fn
 from parrotlet import Appender, Column, Database, Model, column
-from parrotlet import functions as F
 
 
 class User(Model, table="users", schema="main"):
@@ -15,7 +15,7 @@ class User(Model, table="users", schema="main"):
     name: Column[str]
     age: Column[int | None] = column(default=None)
     home: Column[BaseGeometry | None] = column(default=None)
-    joined: Column[datetime.datetime] = column(default=F.now())
+    joined: Column[datetime.datetime] = column(default=fn.now())
 
 
 @pytest.fixture
@@ -37,7 +37,7 @@ def test_insert_models_mappings_and_sequences(db: Database) -> None:
         app.append({"id": 4, "name": "map", "age": None, "home": None})
         app.append((5, "seq", 50, None))
     assert rows(db) == [(1, "alice", 30), (2, "u2", None), (3, "u3", None), (4, "map", None), (5, "seq", 50)]
-    (alice,) = db.from_(User).where(User.id == 1).fetch(User)
+    (alice,) = db.from_(User).where(User.id == 1).fetch_as(User)
     assert alice.home == Point(1, 2)
     assert isinstance(alice.joined, datetime.datetime)
 
@@ -53,6 +53,15 @@ def test_upsert_update_delete(db: Database) -> None:
     with db.appender(User, action="delete") as app:
         app.append(User(id=3, name="ignored"))
     assert rows(db) == [(1, "one", 10), (2, "u2", 20), (9, "nine", None)]
+
+
+def test_upsert_rejects_key(db: Database) -> None:
+    with pytest.raises(ValueError, match="omit key="):
+        db.appender(User, action="upsert", key=[User.id])
+    for name in ("a", "b"):  # a non-model target, upserted twice by primary key
+        with db.appender("main.users", columns=["id", "name"], action="upsert") as app:
+            app.append((1, name))
+    assert rows(db) == [(1, "b", None)]
 
 
 def test_batch_size_flushes(db: Database) -> None:

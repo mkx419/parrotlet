@@ -5,31 +5,39 @@ from __future__ import annotations
 from collections.abc import Sequence
 
 from parrotlet.expr import ColumnRef
-from parrotlet.query import Query, concat, quote_ident, render_literal
+from parrotlet.query import PathLike, Query, concat, ident_list, path_str, quote_ident, render_literal
 from parrotlet.source import TableLike, to_table
-from parrotlet.statement.base import OptionValue, SimpleStatement, Statement, column_name, render_options
+from parrotlet.statement.base import OptionValue, SimpleStatement, Statement, column_names, render_options
 
 
-def copy_to(source: TableLike | Statement, path: str, **options: OptionValue) -> SimpleStatement:
+def copy_to(source: TableLike | Statement, path: PathLike, **options: OptionValue) -> SimpleStatement:
     """`COPY table|(query) TO 'path' (OPTIONS)`.
 
     Options are DuckDB's COPY options in any case: `format="parquet"`, `header=True`, `delimiter="|"`,
     `compression="zstd"`, `partition_by=["year", "month"]`, `overwrite_or_ignore=True`, `per_thread_output=True`, ...
     """
     src = concat("(", source, ")") if isinstance(source, Statement) else to_table(source).ref()
-    return SimpleStatement((Query("COPY "), src, Query(f" TO {render_literal(path)}"), render_options(options)))
+    return SimpleStatement(
+        (Query("COPY "), src, Query(f" TO {render_literal(path_str(path))}"), render_options(options)),
+    )
 
 
 def copy_from(
     table: TableLike,
-    path: str,
+    path: PathLike,
     columns: Sequence[str | ColumnRef[object]] = (),
     **options: OptionValue,
 ) -> SimpleStatement:
     """`COPY table [(cols)] FROM 'path' (OPTIONS)`: load a file into an existing table."""
-    cols = Query(" (" + ", ".join(quote_ident(column_name(c)) for c in columns) + ")") if columns else None
+    cols = Query(" " + ident_list(column_names(columns))) if columns else None
     return SimpleStatement(
-        (Query("COPY "), to_table(table).ref(), cols, Query(f" FROM {render_literal(path)}"), render_options(options)),
+        (
+            Query("COPY "),
+            to_table(table).ref(),
+            cols,
+            Query(f" FROM {render_literal(path_str(path))}"),
+            render_options(options),
+        ),
     )
 
 

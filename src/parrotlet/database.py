@@ -2,15 +2,15 @@
 
 from __future__ import annotations
 
-import dataclasses
 from collections.abc import Iterable, Sequence
 from string.templatelib import Template
-from typing import TYPE_CHECKING, Any, Self, cast, overload
+from typing import TYPE_CHECKING, Any, Self, overload
 
 import duckdb
 
 from parrotlet.appender import AppendAction, Appender, ColumnName
-from parrotlet.query import Node, Query, RawSQL, ensure_extensions
+from parrotlet.execution import ensure_extensions
+from parrotlet.query import Node, PathLike, Query, RawSQL, path_str
 from parrotlet.statement import (
     CreateTable,
     Delete,
@@ -38,7 +38,7 @@ if TYPE_CHECKING:
 
     from parrotlet.model import Model
     from parrotlet.source import Table, TableLike
-    from parrotlet.statement.base import ColumnInput, FromInput, Statement
+    from parrotlet.statement.base import BoundStatement, ColumnInput, FromInput, Statement
 
 
 class Database:
@@ -65,7 +65,7 @@ class Database:
 
     def __init__(
         self,
-        path: str = ":memory:",
+        path: PathLike = ":memory:",
         *,
         read_only: bool = False,
         config: dict[str, Any] | None = None,
@@ -73,12 +73,13 @@ class Database:
         auto_install: bool = True,
         connection: duckdb.DuckDBPyConnection | None = None,
     ) -> None:
-        self.connection = connection if connection is not None else duckdb.connect(path, read_only, config or {})
+        self.connection = (
+            connection if connection is not None else duckdb.connect(path_str(path), read_only, config or {})
+        )
         self.auto_install = auto_install
-        if extensions:
-            ensure_extensions(self.connection, extensions)
+        ensure_extensions(self.connection, extensions)
 
-    # execution ------------------------------------------------------------------------------------------------------
+    # region execution
     def execute(self, statement: Node | Query | Template) -> duckdb.DuckDBPyConnection:
         """Run a statement (or a `Query`, or a raw t-string whose values are bound as parameters)."""
         if isinstance(statement, Template):
@@ -91,7 +92,7 @@ class Database:
         """Run raw SQL from a t-string: `db.sql(t"SELECT * FROM users WHERE id = {user_id}")`."""
         return self.execute(template)
 
-    def fetch[R](self, statement: Node, into: type[R]) -> list[R]:
+    def fetch_as[R](self, statement: Node, into: type[R]) -> list[R]:
         from parrotlet.result import rows_into
 
         return rows_into(self.execute(statement), into)
@@ -110,10 +111,12 @@ class Database:
     ) -> None:
         self.close()
 
-    # binding --------------------------------------------------------------------------------------------------------
-    def bind[S: Statement](self, statement: S) -> S:
-        """Attach a statement built elsewhere to this database, so `.execute()` / `.fetch()` run here."""
-        return dataclasses.replace(cast("Any", statement), _db=self)
+    # endregion
+
+    # region binding
+    def bind[S: BoundStatement](self, statement: S) -> S:
+        """Attach a statement built elsewhere to this database, so `.execute()` / `.fetch_as()` run here."""
+        return statement._replace(_db=self)
 
     def select(self, *columns: ColumnInput) -> Select:
         return self.bind(select(*columns))
@@ -145,7 +148,9 @@ class Database:
     def truncate(self, table: TableLike) -> SimpleStatement:
         return self.bind(truncate(table))
 
-    # models / bulk loading ----------------------------------------------------------------------------------------
+    # endregion
+
+    # region models / bulk loading
     def register[M: Model](self, model: type[M]) -> type[M]:
         """Class decorator: create the model's table if it does not exist (`CREATE TABLE IF NOT EXISTS`)."""
         self.execute(create_table(model).if_not_exists())
@@ -182,3 +187,5 @@ class Database:
     ) -> Appender[Any]:
         """DuckDB's appender for fast bulk `insert` / `upsert` / `update` / `delete`; see `Appender`."""
         return Appender(self.connection, table, columns=columns, action=action, key=key, batch_size=batch_size)
+
+    # endregion

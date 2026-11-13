@@ -12,7 +12,7 @@ o = orders.c
 def count(con: duckdb.DuckDBPyConnection, where: object = None) -> int:
     q = select(func.count()).from_(users)
     if where is not None:
-        q = q.where(where)  # type: ignore[arg-type]
+        q = q.where(where)  # type: ignore[arg-type]  # ty: ignore[invalid-argument-type]
     row = q.execute(con).fetchone()
     assert row is not None
     return row[0]

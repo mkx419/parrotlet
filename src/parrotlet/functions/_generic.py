@@ -11,7 +11,7 @@ from __future__ import annotations
 from collections.abc import Callable
 from typing import Any, overload
 
-from parrotlet import sqltypes as t
+from parrotlet import type as t
 from parrotlet.expr import AggregateFunc, Expr, Func, Star, WindowFunc
 from parrotlet.functions import _runtime as rt
 from parrotlet.functions._runtime import OrderBy, PyScalar, Value
@@ -59,7 +59,7 @@ __all__ = [
 ]
 
 
-# scalar ---------------------------------------------------------------------------------------------------------------
+# region scalar
 
 
 def coalesce[T](first: Expr[T], /, *rest: Expr[T] | PyScalar) -> Func[T]:
@@ -116,10 +116,13 @@ list_pack = list_value
 
 def struct_pack(**fields: Value) -> Func[t.Struct]:
     """A struct from named values: `struct_pack(a=1, b=x)`. SQL: `struct_pack`"""
-    return Func("struct_pack", (), tuple((k, rt.arg(v)) for k, v in fields.items()))  # type: ignore[misc]
+    return Func("struct_pack", (), tuple((k, rt.arg(v)) for k, v in fields.items()))
 
 
-# lambdas --------------------------------------------------------------------------------------------------------------
+# endregion
+
+
+# region lambdas
 
 
 @overload
@@ -170,9 +173,10 @@ def list_reduce(values: Expr[Any], fn: Callable[..., Expr[Any]], initial: Value 
 
 
 array_reduce = reduce = list_reduce
+# endregion
 
 
-# aggregates -----------------------------------------------------------------------------------------------------------
+# region aggregates
 
 
 @overload
@@ -260,9 +264,10 @@ def arg_max(value: Value, by: Value, n: Value = _MISSING, /, *, distinct: bool =
 
 argmin = min_by = arg_min
 argmax = max_by = arg_max
+# endregion
 
 
-# window ---------------------------------------------------------------------------------------------------------------
+# region window
 
 
 def lag[T](
@@ -291,3 +296,6 @@ def lead[T](
     """The value `offset` rows after the current row (or `default`). SQL: `lead`"""
     args: tuple[object, ...] = (value, offset) if default is None else (value, offset, default)
     return rt.window("lead", args, ignore_nulls, order_by)
+
+
+# endregion

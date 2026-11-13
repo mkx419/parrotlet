@@ -6,14 +6,14 @@ from typing import TYPE_CHECKING, override
 from parrotlet.model import Column, Model
 from parrotlet.query import Node, Query, concat, inline_params, join, unqualified_columns
 from parrotlet.source import Table, TableLike, to_table
-from parrotlet.statement.base import Statement
+from parrotlet.statement.base import BoundStatement, create_head
 
 if TYPE_CHECKING:
-    from parrotlet.database import Database
+    pass
 
 
 @dataclass(frozen=True, slots=True, eq=False)
-class CreateTable(Statement):
+class CreateTable(BoundStatement):
     _table: Table
     _columns: tuple[Column, ...] = ()
     _constraints: tuple[Node, ...] = ()
@@ -21,7 +21,6 @@ class CreateTable(Statement):
     _if_not_exists: bool = False
     _temporary: bool = False
     _as: Node | None = None
-    _db: Database | None = None
 
     def or_replace(self) -> CreateTable:
         return replace(self, _or_replace=True)
@@ -41,12 +40,11 @@ class CreateTable(Statement):
         if self._or_replace and self._if_not_exists:
             raise ValueError("OR REPLACE and IF NOT EXISTS cannot be combined")
 
-        head = Query(
-            "CREATE "
-            + ("OR REPLACE " if self._or_replace else "")
-            + ("TEMPORARY " if self._temporary else "")
-            + "TABLE "
-            + ("IF NOT EXISTS " if self._if_not_exists else ""),
+        head = create_head(
+            "TABLE",
+            or_replace=self._or_replace,
+            temporary=self._temporary,
+            if_not_exists=self._if_not_exists,
         )
         if self._as is not None:
             # CTAS keeps parameters: DuckDB binds them in the SELECT.

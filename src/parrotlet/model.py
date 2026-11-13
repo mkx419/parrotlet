@@ -14,13 +14,13 @@ class User(Model, table="users"):
 
 User.age                           # ColumnRef[BigInt] -> use it in queries: User.age > 20
 u = User(id=1, name="alice")       # a row; u.age is `int | None`
-db.insert(User).values(u).execute(); db.from_(User).where(User.age > 20).fetch(User)
+db.insert(User).values(u).execute(); db.from_(User).where(User.age > 20).fetch_as(User)
 ```
 
 The SQL type of each column is inferred from the annotation (`int` -> BIGINT, `str` -> VARCHAR, `float` -> DOUBLE,
 `Decimal` -> DECIMAL(18, 3), `bool`, `bytes`, `UUID`, `date`, `datetime`, `time`, `timedelta`, shapely geometries ->
 GEOMETRY, `list[X]` -> X[], `dict[K, V]` -> MAP(K, V)); `X | None` makes it nullable, anything else is NOT NULL. Pass an
-explicit type with `column(dt.INTEGER)` when the default does not fit.
+explicit type with `column(qlt.Integer)` when the default does not fit.
 """
 
 from __future__ import annotations
@@ -36,12 +36,12 @@ from uuid import UUID
 
 from shapely.geometry.base import BaseGeometry
 
-from parrotlet import datatype as dt
-from parrotlet import sqltypes as t
-from parrotlet.datatype import DataType, to_type
+import parrotlet.type as qlt
+from parrotlet import type as t
 from parrotlet.expr import DEFAULT, ColumnRef, Expr, PyScalar, to_expr
-from parrotlet.query import Node, Query, concat, quote_ident
+from parrotlet.query import Node, Query, concat, ident_list, quote_ident
 from parrotlet.source import Table, model_table
+from parrotlet.type import SqlType, TypeLike, to_type
 
 _MISSING: Any = object()
 
@@ -49,31 +49,26 @@ type ColumnLike = str | ColumnRef[Any] | Column[Any]
 type RefTarget = str | ColumnRef[Any] | Column[Any] | type[Model]
 
 
-def _column_name(column: ColumnLike) -> str:
-    return column if isinstance(column, str) else column.name
+def _column_names(columns: Sequence[ColumnLike]) -> str:
+    """`("a", "b")` from column names, column references or `Column`s."""
+    return ident_list(c if isinstance(c, str) else c.name for c in columns)
 
 
-def _name_list(names: Sequence[str]) -> str:
-    return "(" + ", ".join(quote_ident(n) for n in names) + ")"
+# region Python type -> SQL type
 
-
-# --------------------------------------------------------------------------------------------------------------------
-# Python type -> SQL type
-# --------------------------------------------------------------------------------------------------------------------
-
-_SCALARS: tuple[tuple[type, DataType[Any]], ...] = (
-    (bool, dt.BOOLEAN),  # before int: bool is a subclass of int
-    (int, dt.BIGINT),
-    (float, dt.DOUBLE),
-    (PyDecimal, dt.DECIMAL(18, 3)),
-    (str, dt.VARCHAR),
-    (bytes, dt.BLOB),
-    (UUID, dt.UUID),
-    (datetime.datetime, dt.TIMESTAMP),  # before date: datetime is a subclass of date
-    (datetime.date, dt.DATE),
-    (datetime.time, dt.TIME),
-    (datetime.timedelta, dt.INTERVAL),
-    (BaseGeometry, dt.GEOMETRY),
+_SCALARS: tuple[tuple[type, SqlType], ...] = (
+    (bool, qlt.Boolean()),  # before int: bool is a subclass of int
+    (int, qlt.BigInt()),
+    (float, qlt.Double()),
+    (PyDecimal, qlt.Decimal(18, 3)),
+    (str, qlt.Varchar()),
+    (bytes, qlt.Blob()),
+    (UUID, qlt.Uuid()),
+    (datetime.datetime, qlt.Timestamp()),  # before date: datetime is a subclass of date
+    (datetime.date, qlt.Date()),
+    (datetime.time, qlt.Time()),
+    (datetime.timedelta, qlt.Interval()),
+    (BaseGeometry, qlt.Geometry()),
 )
 
 
@@ -85,26 +80,27 @@ def _split_optional(tp: object) -> tuple[object, bool]:
     return tp, False
 
 
-def infer_type(tp: object) -> tuple[DataType[Any], bool]:
+def infer_type(tp: object) -> tuple[SqlType, bool]:
     """The DuckDB type and nullability for a Python annotation (without the `Column[...]` wrapper)."""
     inner, nullable = _split_optional(tp)
     origin = typing.get_origin(inner)
     if origin is list:
         (elem,) = typing.get_args(inner) or (Any,)
-        return infer_type(elem)[0].as_list(), nullable
+        return qlt.List(infer_type(elem)[0]), nullable
     if origin is dict:
         key, value = typing.get_args(inner) or (Any, Any)
-        return dt.MAP(infer_type(key)[0], infer_type(value)[0]), nullable
+        return qlt.Map(infer_type(key)[0], infer_type(value)[0]), nullable
     if isinstance(inner, type):
         for py, sql in _SCALARS:
             if issubclass(inner, py):
                 return sql, nullable
-    raise TypeError(f"Cannot infer a DuckDB type for {tp!r}; pass one explicitly: column(dt.<TYPE>)")
+    raise TypeError(f"Cannot infer a DuckDB type for {tp!r}; pass one explicitly: column(qlt.<Type>)")
 
 
-# --------------------------------------------------------------------------------------------------------------------
-# Column descriptor
-# --------------------------------------------------------------------------------------------------------------------
+# endregion
+
+
+# region Column descriptor
 
 
 class Column[P]:
@@ -135,7 +131,7 @@ class Column[P]:
 
     def __init__(
         self,
-        sql_type: DataType[Any] | str | None = None,
+        sql_type: TypeLike | None = None,
         *,
         name: str | None = None,
         primary_key: bool = False,
@@ -150,7 +146,7 @@ class Column[P]:
         collate: str | None = None,
         init: bool = True,
     ) -> None:
-        self.sql_type: DataType[Any] | None = to_type(sql_type) if sql_type is not None else None
+        self.sql_type: SqlType | None = to_type(sql_type) if sql_type is not None else None
         self._name = name
         self.attr: str | None = None
         self.primary_key = primary_key
@@ -184,6 +180,13 @@ class Column[P]:
         return self._name
 
     # class access -> typed column reference; instance access -> value
+    # (geometry first: shapely's base class is untyped, so some checkers would also match it against `int`)
+    @overload
+    def __get__[X: BaseGeometry](
+        self: Column[X] | Column[X | None],
+        obj: None,
+        owner: type,
+    ) -> ColumnRef[t.Geometry]: ...
     @overload
     def __get__[X: bool](self: Column[X] | Column[X | None], obj: None, owner: type) -> ColumnRef[t.Boolean]: ...
     @overload
@@ -214,12 +217,6 @@ class Column[P]:
         obj: None,
         owner: type,
     ) -> ColumnRef[t.Interval]: ...
-    @overload
-    def __get__[X: BaseGeometry](
-        self: Column[X] | Column[X | None],
-        obj: None,
-        owner: type,
-    ) -> ColumnRef[t.Geometry]: ...
     @overload
     def __get__(
         self: Column[list[str]] | Column[list[str] | None],
@@ -260,7 +257,7 @@ class Column[P]:
     def __set__(self, obj: object, value: P) -> None:
         obj.__dict__[cast("str", self.attr)] = value
 
-    # resolution ---------------------------------------------------------------------------------------------------
+    # region resolution
     def resolve(self, annotation: object) -> None:
         """Fill in the SQL type / nullability from the Python annotation."""
         self.python_type = annotation
@@ -271,14 +268,18 @@ class Column[P]:
             self.nullable = optional
 
     def has_default(self) -> bool:
-        return self.default is not _MISSING or self.default_factory is not None or self.server_default is not _MISSING
+        return self.default is not _MISSING or self.default_factory is not None or self.has_server_default()
+
+    def has_server_default(self) -> bool:
+        """True if the database fills the column in (an SQL expression default)."""
+        return self.server_default is not _MISSING
 
     def initial_value(self) -> object:
         if self.default is not _MISSING:
             return self.default
         if self.default_factory is not None:
             return self.default_factory()
-        if self.server_default is not _MISSING:
+        if self.has_server_default():
             return DEFAULT  # let the database fill it in on INSERT
         raise TypeError(f"missing value for {self.attr!r}")
 
@@ -297,7 +298,7 @@ class Column[P]:
             sql_default = _MISSING
         return concat(
             Query(quote_ident(self.name) + " "),
-            self.sql_type,
+            self.sql_type.build(),
             Query(f" COLLATE {quote_ident(self.collation)}") if self.collation is not None else None,
             " PRIMARY KEY" if self.primary_key else None,
             " NOT NULL" if self.nullable is False and not self.primary_key else None,
@@ -314,9 +315,11 @@ class Column[P]:
     def __repr__(self) -> str:
         return f"Column({self._name!r}, {self.sql_type})"
 
+    # endregion
+
 
 def column(
-    sql_type: DataType[Any] | str | None = None,
+    sql_type: TypeLike | None = None,
     *,
     name: str | None = None,
     primary_key: bool = False,
@@ -339,7 +342,7 @@ def column(
     name : SQL column name when it differs from the attribute (`type_: Column[str] = column(name="type")`).
     primary_key, unique : constraints. `nullable` overrides the nullability inferred from `X | None`.
     default : Python default for the constructor, also rendered as the SQL `DEFAULT`. An SQL expression
-        (`default=F.now()`, `default=F.nextval("seq")`) is a database-side default: instances created without the
+        (`default=fn.now()`, `default=fn.nextval("seq")`) is a database-side default: instances created without the
         value insert `DEFAULT`.
     default_factory : Python-side default factory (e.g. `list`).
     server_default : an SQL-only default (prefer `default=<expression>`, which type checkers see as optional).
@@ -366,18 +369,18 @@ def column(
     )
 
 
-# --------------------------------------------------------------------------------------------------------------------
-# Foreign keys
-# --------------------------------------------------------------------------------------------------------------------
+# endregion
+
+
+# region Foreign keys
 
 
 def _resolve_reference(target: RefTarget) -> tuple[Table, tuple[str, ...]]:
     """Resolve a foreign key target to (table, columns)."""
     if isinstance(target, Column):
-        owner = target.owner
-        if owner is None or not hasattr(owner, "__table__"):
+        table = model_table(target.owner)
+        if table is None:
             raise ValueError(f"Cannot resolve the table of column {target.name!r}")
-        table: Table = owner.__table__
         return Table(table.name, table.schema, table.catalog), (target.name,)
     if isinstance(target, ColumnRef):
         if not target.qualifier:
@@ -399,12 +402,13 @@ def _resolve_reference(target: RefTarget) -> tuple[Table, tuple[str, ...]]:
 
 def _references_sql(target: RefTarget) -> Query:
     table, columns = _resolve_reference(target)
-    return concat(" REFERENCES ", table.ref(), Query(" " + _name_list(columns)) if columns else None)
+    return concat(" REFERENCES ", table.ref(), Query(" " + ident_list(columns)) if columns else None)
 
 
-# --------------------------------------------------------------------------------------------------------------------
-# Table constraints (returned from Model.constraints)
-# --------------------------------------------------------------------------------------------------------------------
+# endregion
+
+
+# region Table constraints (returned from Model.constraints)
 
 
 class Constraint(Node):
@@ -413,30 +417,32 @@ class Constraint(Node):
     __slots__ = ()
 
 
-class PrimaryKey(Constraint):
+class _ColumnListConstraint(Constraint):
+    """`<KEYWORD> (a, b)` over columns of the table."""
+
+    __slots__ = ("columns",)
+    _keyword: ClassVar[str]
+
+    def __init__(self, *columns: ColumnLike) -> None:
+        self.columns = columns
+
+    @override
+    def build(self) -> Query:
+        return Query(f"{self._keyword} {_column_names(self.columns)}")
+
+
+class PrimaryKey(_ColumnListConstraint):
     """Composite `PRIMARY KEY (a, b)`."""
 
-    __slots__ = ("columns",)
-
-    def __init__(self, *columns: ColumnLike) -> None:
-        self.columns = columns
-
-    @override
-    def build(self) -> Query:
-        return Query("PRIMARY KEY " + _name_list([_column_name(c) for c in self.columns]))
+    __slots__ = ()
+    _keyword = "PRIMARY KEY"
 
 
-class Unique(Constraint):
+class Unique(_ColumnListConstraint):
     """Composite `UNIQUE (a, b)`."""
 
-    __slots__ = ("columns",)
-
-    def __init__(self, *columns: ColumnLike) -> None:
-        self.columns = columns
-
-    @override
-    def build(self) -> Query:
-        return Query("UNIQUE " + _name_list([_column_name(c) for c in self.columns]))
+    __slots__ = ()
+    _keyword = "UNIQUE"
 
 
 class Check(Constraint):
@@ -466,21 +472,22 @@ class ForeignKey(Constraint):
 
     @override
     def build(self) -> Query:
-        head = Query("FOREIGN KEY " + _name_list([_column_name(c) for c in self.columns]))
+        head = Query("FOREIGN KEY " + _column_names(self.columns))
         refs = self.references
         if isinstance(refs, (str, ColumnRef, Column, type)):
-            return head + _references_sql(refs)
-        resolved = [_resolve_reference(r) for r in refs]
+            return head + _references_sql(cast("RefTarget", refs))
+        resolved = [_resolve_reference(r) for r in cast("Sequence[RefTarget]", refs)]
         if len({tbl.ref().sql for tbl, _ in resolved}) != 1:
             raise ValueError("All referenced columns must belong to the same table")
         table = resolved[0][0]
         columns = [c for _, cols in resolved for c in cols]
-        return concat(head, " REFERENCES ", table.ref(), Query(" " + _name_list(columns)))
+        return concat(head, " REFERENCES ", table.ref(), Query(" " + ident_list(columns)))
 
 
-# --------------------------------------------------------------------------------------------------------------------
-# Model
-# --------------------------------------------------------------------------------------------------------------------
+# endregion
+
+
+# region Model
 
 
 def _snake_case(name: str) -> str:
@@ -580,7 +587,7 @@ class Model:
         """
         return ()
 
-    # rows -----------------------------------------------------------------------------------------------------------
+    # region rows
     def to_dict(self) -> dict[str, Any]:
         """`{attribute: value}` for every column."""
         return {cast("str", c.attr): self.__dict__.get(cast("str", c.attr)) for c in type(self).__columns__}
@@ -610,16 +617,17 @@ class Model:
 
     @override
     def __eq__(self, other: object) -> bool:
-        return type(other) is type(self) and self.to_dict() == cast("Model", other).to_dict()
+        return isinstance(other, Model) and type(other) is type(self) and self.to_dict() == other.to_dict()
 
     __hash__ = None  # type: ignore[assignment]
+    # endregion
 
 
 def _decode(c: Column[Any], value: object) -> object:
     if (
         isinstance(value, (bytes, bytearray, memoryview))
         and c.sql_type is not None
-        and c.sql_type.name.startswith("GEOMETRY")
+        and isinstance(c.sql_type, qlt.Geometry)
     ):
         import shapely
 
@@ -638,3 +646,6 @@ def aliased[M: Model](model: type[M], alias: str) -> type[M]:
             lambda ns: ns.update(__module__=model.__module__),
         ),
     )
+
+
+# endregion

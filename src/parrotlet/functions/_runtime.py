@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from collections.abc import Callable, Sequence
-from typing import Any
+from typing import Any, cast
 
 from parrotlet.expr import (
     AggregateFunc,
@@ -12,12 +12,11 @@ from parrotlet.expr import (
     Lambda,
     PyScalar,
     WindowFunc,
-    as_tuple,
     make_lambda,
-    to_column,
+    order_items,
     to_expr,
 )
-from parrotlet.query import Node
+from parrotlet.query import Node, PathLike
 from parrotlet.source import FunctionSource
 from parrotlet.statement.base import ColumnInput
 
@@ -31,6 +30,7 @@ type TableFunction = FunctionSource
 __all__ = [
     "LambdaArg",
     "OrderBy",
+    "PathLike",
     "PyDict",
     "PyList",
     "PyScalar",
@@ -44,15 +44,19 @@ __all__ = [
 ]
 
 
-def arg(value: object) -> Node:
+def arg(value: object) -> Expr[Any]:
     """Coerce a function argument: Python callables become SQL lambdas, other values become expressions."""
     if callable(value) and not isinstance(value, (Node, type)):
-        return make_lambda(value)  # pyright: ignore[reportArgumentType]
+        return make_lambda(cast("Callable[..., Expr[Any]]", value))
     return to_expr(value)
 
 
+def _args(args: Sequence[object]) -> tuple[Node, ...]:
+    return tuple(arg(a) for a in args)
+
+
 def scalar(name: str, args: Sequence[object], extension: str | None = None) -> Func[Any]:
-    return Func(name, tuple(arg(a) for a in args), extension=extension)
+    return Func(name, _args(args), extension=extension)
 
 
 def aggregate(
@@ -62,13 +66,7 @@ def aggregate(
     order_by: OrderBy,
     extension: str | None = None,
 ) -> AggregateFunc[Any]:
-    return AggregateFunc(
-        name,
-        tuple(arg(a) for a in args),
-        extension=extension,
-        distinct=distinct,
-        order_by=tuple(to_column(o) for o in as_tuple(order_by)),
-    )
+    return AggregateFunc(name, _args(args), extension=extension, distinct=distinct, order_by=order_items(order_by))
 
 
 def window(
@@ -80,9 +78,9 @@ def window(
 ) -> WindowFunc[Any]:
     return WindowFunc(
         name,
-        tuple(arg(a) for a in args),
+        _args(args),
         ignore_nulls=ignore_nulls,
-        order_by=tuple(to_column(o) for o in as_tuple(order_by)),
+        order_by=order_items(order_by),
         extension=extension,
     )
 
@@ -95,4 +93,4 @@ def table(
 ) -> FunctionSource:
     """A table function call for FROM; `options` are rendered as named parameters (`name := value`)."""
     named = tuple((k, to_expr(v)) for k, v in options.items() if v is not None)
-    return FunctionSource(Func(name, tuple(arg(a) for a in args), named, extension))
+    return FunctionSource(Func(name, _args(args), named, extension))

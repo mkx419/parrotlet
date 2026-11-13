@@ -5,34 +5,31 @@ from dataclasses import dataclass, replace
 from typing import TYPE_CHECKING, Any, override
 
 from parrotlet.expr import Bool, ColumnRef, Expr
-from parrotlet.query import Node, Query, concat, join
-from parrotlet.source import CTE, Table, TableLike, to_from_item, to_table
+from parrotlet.query import Node, Query, concat
+from parrotlet.source import Table, TableLike, to_from_item, to_table
 from parrotlet.statement.base import (
-    ColumnInput,
+    DmlStatement,
+    Filterable,
     FromInput,
-    Statement,
     Value,
-    and_where,
     assignments,
+    clause,
+    list_clause,
     render_assignments,
     returning_clause,
-    to_columns,
     with_clause,
 )
 
 if TYPE_CHECKING:
-    from parrotlet.database import Database
+    pass
 
 
 @dataclass(frozen=True, slots=True, eq=False)
-class Update(Statement):
+class Update(DmlStatement, Filterable):
     _table: Table
     _set: tuple[tuple[str, Expr[Any]], ...] = ()
     _from: tuple[Node, ...] = ()
     _where: Bool | None = None
-    _returning: tuple[Node, ...] = ()
-    _ctes: tuple[CTE, ...] = ()
-    _db: Database | None = None
 
     def set(self, values: Mapping[str | ColumnRef[Any], Value] | None = None, /, **kwargs: Value) -> Update:
         """`.set({"a": 1})`, `.set({t.c.a: t.c.a + 1})` or `.set(a=1)`. Plain values are bound as parameters."""
@@ -40,15 +37,6 @@ class Update(Statement):
 
     def from_(self, *items: FromInput) -> Update:
         return replace(self, _from=(*self._from, *(to_from_item(i) for i in items)))
-
-    def where(self, *conditions: Bool) -> Update:
-        return replace(self, _where=and_where(self._where, conditions))
-
-    def returning(self, *items: ColumnInput) -> Update:
-        return replace(self, _returning=(*self._returning, *to_columns(items)))
-
-    def with_(self, *ctes: CTE) -> Update:
-        return replace(self, _ctes=(*self._ctes, *ctes))
 
     @override
     def build(self) -> Query:
@@ -60,8 +48,8 @@ class Update(Statement):
             self._table,
             " SET ",
             render_assignments(self._set),
-            concat(" FROM ", join(", ", self._from)) if self._from else None,
-            concat(" WHERE ", self._where) if self._where is not None else None,
+            list_clause("FROM", self._from),
+            clause("WHERE", self._where),
             returning_clause(self._returning),
         )
 

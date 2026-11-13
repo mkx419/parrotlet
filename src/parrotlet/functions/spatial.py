@@ -15,12 +15,13 @@ from uuid import UUID as _UUID
 
 from shapely.geometry.base import BaseGeometry as _Geom
 
-from parrotlet import sqltypes as _t
+from parrotlet import type as _t
 from parrotlet.expr import AggregateFunc as _A, Expr as _E, Func as _F, WindowFunc as _W
 from parrotlet.functions import _runtime as _rt
 from parrotlet.functions._runtime import (
     LambdaArg as _LambdaArg,
     OrderBy as _OrderBy,
+    PathLike as _PathLike,
     PyDict as _PyDict,
     PyList as _PyList,
     PyScalar as _PyScalar,
@@ -205,6 +206,9 @@ __all__ = [
 ]
 
 
+# region D
+
+
 def duck_db_proj_compiled_version() -> _F[_t.Varchar]:
     """Returns a text description of the PROJ library version that this instance of DuckDB was compiled against.
 
@@ -223,9 +227,21 @@ def duck_db_proj_version() -> _F[_t.Varchar]:
     return _rt.scalar("DuckDB_Proj_Version", (), "spatial")
 
 
+# endregion
+
+
+# region P
+
+
 def pragma_rtree_index_info() -> _TableFunction:
     """SQL: `pragma_rtree_index_info`"""
     return _rt.table("pragma_rtree_index_info", (), {}, "spatial")
+
+
+# endregion
+
+
+# region R
 
 
 def rtree_index_dump(index_name: _E[_t.Varchar] | str, /) -> _TableFunction:
@@ -238,8 +254,14 @@ def rtree_index_scan() -> _TableFunction:
     return _rt.table("rtree_index_scan", (), {}, "spatial")
 
 
+# endregion
+
+
+# region S
+
+
 @_overload
-def shapefile_meta(path: _E[_t.Varchar] | str, /) -> _TableFunction: ...
+def shapefile_meta(path: _E[_t.Varchar] | str | _PathLike, /) -> _TableFunction: ...
 @_overload
 def shapefile_meta(path: _E[_t.Variant], /) -> _TableFunction: ...
 @_overload
@@ -1566,7 +1588,7 @@ def st_quad_key(*args: _Any) -> _F[_Any]:
 
 
 def st_read(
-    file_name: _E[_t.Varchar] | str,
+    file_name: _E[_t.Varchar] | str | _PathLike,
     /,
     *,
     open_options: _PyList | None = None,
@@ -1597,7 +1619,7 @@ def st_read(
 
 
 @_overload
-def st_read_meta(path: _E[_t.Varchar] | str, /) -> _TableFunction: ...
+def st_read_meta(path: _E[_t.Varchar] | str | _PathLike, /) -> _TableFunction: ...
 @_overload
 def st_read_meta(path: _E[_t.Variant], /) -> _TableFunction: ...
 @_overload
@@ -1611,7 +1633,7 @@ def st_read_meta(*args: _Any, **options: _Any) -> _TableFunction:
     return _rt.table("ST_Read_Meta", args, options, "spatial")
 
 
-def st_read_osm(path: _E[_t.Varchar] | str, /) -> _TableFunction:
+def st_read_osm(path: _E[_t.Varchar] | str | _PathLike, /) -> _TableFunction:
     """The `ST_ReadOsm()` table function enables reading compressed OpenStreetMap data directly from a `.osm.pbf` file. This function uses multithreading and zero-copy protobuf parsing which makes it a lot faster than using the `ST_Read()` OSM driver, however it only outputs the raw OSM data (Nodes, Ways, Relations), without constructing any geometries. For simple node entities (like PoI's) you can trivially construct POINT geometries, but it is also possible to construct LINESTRING and POLYGON geometries by manually joining refs and nodes together in SQL, although with available memory usually being a limiting factor. The `ST_ReadOSM()` function also provides a "replacement scan" to enable reading from a file directly as if it were a table. This is just syntax sugar for calling `ST_ReadOSM()` though. Example: ```sql SELECT * FROM 'tmp/data/germany.osm.pbf' LIMIT 5; ```
 
     Example: `SELECT * FROM ST_ReadOSM('tmp/data/germany.osm.pbf') WHERE tags['highway'] != [] LIMIT 5; ---- ┌──────────────────────┬────────┬──────────────────────┬─────────┬────────────────────┬────────────┬───────────┬────────────────────────┐ │ kind │ id │ tags │ refs │ lat │ lon │ ref_roles │ ref_types │ │ enum('node', 'way'… │ int64 │ map(varchar, varch… │ int64[] │ double │ double │ varchar[] │ enum('node', 'way', … │ ├──────────────────────┼────────┼──────────────────────┼─────────┼────────────────────┼────────────┼───────────┼────────────────────────┤ │ node │ 122351 │ {bicycle=yes, butt… │ │ 53.5492951 │ 9.977553 │ │ │ │ node │ 122397 │ {crossing=no, high… │ │ 53.520990100000006 │ 10.0156924 │ │ │ │ node │ 122493 │ {TMC:cid_58:tabcd_… │ │ 53.129614600000004 │ 8.1970173 │ │ │ │ node │ 123566 │ {highway=traffic_s… │ │ 54.617268200000005 │ 8.9718171 │ │ │ │ node │ 125801 │ {TMC:cid_58:tabcd_… │ │ 53.070685000000005 │ 8.7819939 │ │ │ └──────────────────────┴────────┴──────────────────────┴─────────┴────────────────────┴────────────┴───────────┴────────────────────────┘`
@@ -1620,7 +1642,7 @@ def st_read_osm(path: _E[_t.Varchar] | str, /) -> _TableFunction:
     return _rt.table("ST_ReadOSM", (path,), {}, "spatial")
 
 
-def st_read_shp(file_name: _E[_t.Varchar] | str, /, *, encoding: str | None = None) -> _TableFunction:
+def st_read_shp(file_name: _E[_t.Varchar] | str | _PathLike, /, *, encoding: str | None = None) -> _TableFunction:
     """Read a Shapefile without relying on the GDAL library
 
     SQL: `ST_ReadSHP`"""
@@ -1985,7 +2007,12 @@ def st_zm_flag(geom: _E[_t.Geometry] | _Geom, /) -> _F[_t.UTinyInt]:
     return _rt.scalar("ST_ZMFlag", (geom,), "spatial")
 
 
-# core ST_* functions (they do not need the spatial extension)
+# endregion
+
+
+# region core ST_* functions (they do not need the spatial extension)
+
+
 from parrotlet.functions._core import st_as_binary as st_as_binary
 from parrotlet.functions._core import st_as_geojson as st_as_geojson
 from parrotlet.functions._core import st_as_text as st_as_text
@@ -2003,3 +2030,6 @@ from parrotlet.functions._core import st_set_crs as st_set_crs
 from parrotlet.functions._core import st_within as st_within
 from parrotlet.functions._core import st_x as st_x
 from parrotlet.functions._core import st_y as st_y
+
+
+# endregion

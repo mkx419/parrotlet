@@ -6,10 +6,9 @@ import pytest
 from shapely.geometry import Point
 from shapely.geometry.base import BaseGeometry
 
+import parrotlet.functions as fn
+import parrotlet.type as qlt
 from parrotlet import Column, Database, Model, col, column, create_view, func, select
-from parrotlet import datatype as dt
-from parrotlet import functions as F
-from parrotlet.functions import spatial as ST
 
 
 @pytest.fixture
@@ -23,10 +22,10 @@ def test_register_creates_table(db: Database) -> None:
     class User(Model, table="users"):
         id: Column[int] = column(primary_key=True)
         name: Column[str]
-        joined: Column[datetime.datetime] = column(default=F.now())
+        joined: Column[datetime.datetime] = column(default=fn.now())
 
     db.insert(User).values(User(id=1, name="alice"), User(id=2, name="bob")).execute()
-    rows = db.from_(User).where(User.id == 2).fetch(User)
+    rows = db.from_(User).where(User.id == 2).fetch_as(User)
     assert [(u.id, u.name) for u in rows] == [(2, "bob")]
     assert isinstance(rows[0].joined, datetime.datetime)
     db.register(User)  # idempotent: CREATE TABLE IF NOT EXISTS
@@ -41,12 +40,12 @@ def test_bound_statements(db: Database) -> None:
     db.insert(Item).values(Item(id=1), Item(id=2, qty=5)).execute()
     db.update(Item).set({Item.qty: Item.qty + 1}).where(Item.id == 1).execute()
     assert db.select(Item.id, Item.qty).from_(Item).order_by(Item.id).fetchall() == [(1, 1), (2, 5)]
-    assert db.from_(Item).where(Item.qty > 2).fetch(Item) == [Item(id=2, qty=5)]
+    assert db.from_(Item).where(Item.qty > 2).fetch_as(Item) == [Item(id=2, qty=5)]
     assert db.select(Item.id).from_(Item).union(select(Item.id).from_(Item)).fetchall() is not None
     db.delete(Item).where(Item.id == 1).execute()
-    assert db.select(F.count()).from_(Item).fetchone() == (1,)
+    assert db.select(fn.count()).from_(Item).fetchone() == (1,)
     db.truncate(Item).execute()
-    assert db.select(F.count()).from_(Item).fetchone() == (0,)
+    assert db.select(fn.count()).from_(Item).fetchone() == (0,)
 
 
 def test_execute_other_statements_and_raw_sql(db: Database) -> None:
@@ -63,7 +62,7 @@ def test_spatial_is_loaded_automatically(db: Database) -> None:
         return bool(row and row[0])
 
     assert not loaded()
-    assert db.select(ST.st_distance(ST.st_point(0, 0), ST.st_point(3, 4))).fetchone() == (5.0,)
+    assert db.select(fn.spatial.st_distance(fn.spatial.st_point(0, 0), fn.spatial.st_point(3, 4))).fetchone() == (5.0,)
     assert loaded()
 
 
@@ -83,16 +82,16 @@ def test_spatial_model_types(db: Database) -> None:
     class Place(Model, table="places"):
         id: Column[int] = column(primary_key=True)
         geom: Column[BaseGeometry]
-        pt: Column[object | None] = column(dt.POINT_2D, default=None)
+        pt: Column[object | None] = column(qlt.Point2D, default=None)
 
     db.insert(Place).values(Place(id=1, geom=Point(1, 2))).execute()
-    (place,) = db.from_(Place).fetch(Place)
+    (place,) = db.from_(Place).fetch_as(Place)
     assert place.geom == Point(1, 2)
-    assert db.select(ST.st_x(Place.geom)).from_(Place).fetchone() == (1.0,)
+    assert db.select(fn.spatial.st_x(Place.geom)).from_(Place).fetchone() == (1.0,)
 
 
 def test_database_on_existing_connection() -> None:
     con = duckdb.connect()
     db = Database(connection=con)
-    assert db.select(F.upper("x")).fetchone() == ("X",)
+    assert db.select(fn.upper("x")).fetchone() == ("X",)
     assert db.connection is con

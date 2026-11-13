@@ -5,7 +5,7 @@
 Writes:
 - src/parrotlet/functions/_core.py   scalar / aggregate / window / macro functions of core DuckDB and its builtin
                                       extensions (json, icu, parquet, ...)
-- src/parrotlet/functions/tables.py  core table functions (read_parquet, range, ...)
+- src/parrotlet/functions/table.py   core table functions (read_parquet, range, ...)
 - src/parrotlet/functions/spatial.py spatial extension functions (scalar / aggregate / macro / table)
 
 Functions with hand-written generic signatures (see `functions/_generic.py`) are skipped here.
@@ -18,6 +18,7 @@ import re
 import subprocess
 import sys
 from collections import defaultdict
+from collections.abc import Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -26,7 +27,7 @@ import duckdb
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "src"))
 
-from parrotlet import sqltypes  # noqa: E402
+import parrotlet.type as qlt  # noqa: E402
 
 OUT = ROOT / "src" / "parrotlet" / "functions"
 
@@ -140,6 +141,10 @@ LITERAL = {
     "Geometry": "_Geom",
 }
 
+# Table-function parameters holding a file path or glob: their VARCHAR overloads also take `pathlib.Path`
+# (except in json_each / json_tree, where `path` is a JSON path).
+PATH_PARAMS = {"path", "pattern", "file_name"}
+
 # Python types for named (keyword) options of table functions.
 OPTION = {
     "Boolean": "bool",
@@ -150,9 +155,7 @@ OPTION = {
 }
 
 
-# --------------------------------------------------------------------------------------------------------------------
-# SQL type parsing
-# --------------------------------------------------------------------------------------------------------------------
+# region SQL type parsing
 
 
 @dataclass(frozen=True)
@@ -256,7 +259,7 @@ def option_annotation(node: T) -> str:
     if node.kind == "cls":
         if node.name in OPTION:
             return OPTION[node.name]
-        if issubclass(getattr(sqltypes, node.name), sqltypes.HugeInt) or node.name in ("UBigInt", "UHugeInt"):
+        if issubclass(getattr(qlt, node.name), qlt.HugeInt) or node.name in ("UBigInt", "UHugeInt"):
             return "int"
     if node.kind in ("list", "array"):
         return "_PyList"
@@ -268,7 +271,7 @@ def option_annotation(node: T) -> str:
 def rank(node: T) -> int:
     """Sort key: narrower types first so that overload resolution picks the most specific signature."""
     if node.kind == "cls":
-        return -len(getattr(sqltypes, node.name).__mro__)
+        return -len(getattr(qlt, node.name).__mro__)
     if node.kind in ("list", "array", "map"):
         return 10
     if node.kind == "var":
@@ -276,9 +279,10 @@ def rank(node: T) -> int:
     return 100
 
 
-# --------------------------------------------------------------------------------------------------------------------
-# Catalog
-# --------------------------------------------------------------------------------------------------------------------
+# endregion
+
+
+# region Catalog
 
 
 @dataclass
@@ -372,7 +376,7 @@ def load() -> tuple[str, dict[tuple[str, str], Function]]:
         kind = "table" if ftype in ("table", "table_macro") else KIND[ftype]
         if kind != "table" and name.lower() in HANDWRITTEN:
             continue
-        module = "spatial" if ext == "spatial" else ("tables" if kind == "table" else "_core")
+        module = "spatial" if ext == "spatial" else ("table" if kind == "table" else "_core")
         py_name = py_identifier(name)
         key = (module, py_name)
         fn = functions.get(key)
@@ -402,9 +406,10 @@ def load() -> tuple[str, dict[tuple[str, str], Function]]:
     return version, functions
 
 
-# --------------------------------------------------------------------------------------------------------------------
-# Rendering
-# --------------------------------------------------------------------------------------------------------------------
+# endregion
+
+
+# region Rendering
 
 WRAPPER = {"scalar": "_F", "aggregate": "_A", "window": "_W"}
 
@@ -436,7 +441,10 @@ def signature(fn: Function, ov: Overload, positional: int | None = None) -> tupl
     if fn.kind == "table":
         pos = len(params) if positional is None else positional
         for i, (pname, node) in enumerate(params[:pos]):
-            parts.append(f"{param_name(pname, i, used)}: {param_annotation(node, allowed)}")
+            annotation = param_annotation(node, allowed)
+            if pname in PATH_PARAMS and not fn.sql_name.startswith("json_") and annotation.endswith("| str"):
+                annotation += " | _PathLike"  # file paths and globs also take `pathlib.Path`
+            parts.append(f"{param_name(pname, i, used)}: {annotation}")
         if parts:
             parts.append("/")
         if ov.varargs is not None:
@@ -563,12 +571,13 @@ from uuid import UUID as _UUID
 
 from shapely.geometry.base import BaseGeometry as _Geom
 
-from parrotlet import sqltypes as _t
+from parrotlet import type as _t
 from parrotlet.expr import AggregateFunc as _A, Expr as _E, Func as _F, WindowFunc as _W
 from parrotlet.functions import _runtime as _rt
 from parrotlet.functions._runtime import (
     LambdaArg as _LambdaArg,
     OrderBy as _OrderBy,
+    PathLike as _PathLike,
     PyDict as _PyDict,
     PyList as _PyList,
     PyScalar as _PyScalar,
@@ -580,29 +589,37 @@ from parrotlet.functions._runtime import (
 
 TITLES = {
     "_core": "Typed DuckDB functions (core and builtin extensions).",
-    "tables": 'Typed DuckDB table functions, for use in FROM: `select().from_(read_parquet("x.parquet").as_("t"))`.',
+    "table": (
+        'Typed DuckDB table functions, for use in FROM: `select().from_(fn.table.read_parquet("x.parquet").as_("t"))`.'
+    ),
     "spatial": "Typed functions of the DuckDB spatial extension. Run `INSTALL spatial; LOAD spatial` before use.",
 }
 
 
-def write_module(module: str, fns: list[Function], version: str, reexports: list[str] = ()) -> Path:  # type: ignore[assignment]
+def region(title: str, body: str) -> str:
+    """Wrap generated code in `# region` / `# endregion` so editors can fold it."""
+    return f"# region {title}\n\n\n{body.rstrip()}\n\n\n# endregion\n"
+
+
+def write_module(module: str, fns: list[Function], version: str, reexports: Sequence[str] = ()) -> Path:
     by_name = {f.py_name: f for f in fns}
-    body, aliases = [], []
+    groups: dict[str, list[str]] = defaultdict(list)  # functions by initial letter, one foldable region each
+    aliases: list[str] = []
     for fn in sorted(fns, key=lambda f: f.py_name):
         target = fn.alias_of and py_identifier(fn.alias_of)
         if target and target in by_name and by_name[target].kind == fn.kind and target != fn.py_name:
             aliases.append(f"{fn.py_name} = {target}\n")
             continue
-        body.append(render_function(fn))
+        groups[fn.py_name.lstrip("_")[:1].upper() or "_"].append(render_function(fn))
     names = sorted([*(f.py_name for f in fns), *reexports])
     text = HEADER.format(title=TITLES[module], version=version)
     text += "__all__ = [\n" + "".join(f'    "{n}",\n' for n in names) + "]\n\n\n"
-    text += "\n\n".join(body)
+    text += "\n\n".join(region(letter, "\n\n".join(body)) for letter, body in groups.items())
     if aliases:
-        text += "\n\n# aliases\n" + "".join(aliases)
+        text += "\n\n" + region("aliases", "".join(aliases))
     if reexports:
-        text += "\n\n# core ST_* functions (they do not need the spatial extension)\n"
-        text += "".join(f"from parrotlet.functions._core import {n} as {n}\n" for n in reexports)
+        imports = "".join(f"from parrotlet.functions._core import {n} as {n}\n" for n in reexports)
+        text += "\n\n" + region("core ST_* functions (they do not need the spatial extension)", imports)
     path = OUT / f"{module}.py"
     path.write_text(text, encoding="utf-8")
     return path
@@ -625,3 +642,4 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
+# endregion

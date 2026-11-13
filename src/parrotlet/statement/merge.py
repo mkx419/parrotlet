@@ -6,30 +6,32 @@ from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, replace
 from typing import TYPE_CHECKING, Any, Literal, override
 
-from parrotlet import sqltypes as t
+from parrotlet import type as t
 from parrotlet.expr import Bool, ColumnRef, to_expr
-from parrotlet.query import Node, Query, concat, join, quote_ident, render_literal
-from parrotlet.source import CTE, Table, TableLike, to_from_item, to_table
+from parrotlet.query import Node, Query, concat, ident_list, join, render_literal
+from parrotlet.source import Table, TableLike, to_from_item, to_table
 from parrotlet.statement.base import (
-    ColumnInput,
+    DmlStatement,
     FromInput,
-    Statement,
     Value,
     assignments,
-    column_name,
+    clause,
+    column_names,
     render_assignments,
     returning_clause,
-    to_columns,
     with_clause,
 )
 
 if TYPE_CHECKING:
-    from parrotlet.database import Database
+    pass
 
 type WhenKind = Literal["MATCHED", "NOT MATCHED", "NOT MATCHED BY SOURCE"]
 
 merge_action = ColumnRef[t.Varchar]("merge_action")
 """In `MERGE ... RETURNING`: which action applied to the row (`'INSERT'`, `'UPDATE'` or `'DELETE'`)."""
+
+
+# region WHEN clauses
 
 
 @dataclass(frozen=True, slots=True, eq=False)
@@ -40,21 +42,12 @@ class When(Node):
 
     @override
     def build(self) -> Query:
-        return concat(
-            Query(f" WHEN {self.kind}"),
-            concat(" AND ", self.condition) if self.condition is not None else None,
-            " THEN ",
-            self.action,
-        )
-
-
-def _error(message: str | None) -> Query:
-    return Query("ERROR" + (f" {render_literal(message)}" if message is not None else ""))
+        return concat(Query(f" WHEN {self.kind}"), clause("AND", self.condition), " THEN ", self.action)
 
 
 @dataclass(frozen=True, slots=True)
-class _Matched:
-    """Actions for `WHEN MATCHED` / `WHEN NOT MATCHED BY SOURCE` (the target row exists)."""
+class _WhenActions:
+    """Actions available in every WHEN clause; subclasses add the ones specific to their kind."""
 
     merge: Merge
     kind: WhenKind
@@ -62,6 +55,18 @@ class _Matched:
 
     def _then(self, action: Query) -> Merge:
         return replace(self.merge, _whens=(*self.merge._whens, When(self.kind, self.condition, action)))
+
+    def do_nothing(self) -> Merge:
+        return self._then(Query("DO NOTHING"))
+
+    def error(self, message: str | None = None) -> Merge:
+        """`ERROR ['message']`: abort the MERGE if such a row occurs."""
+        return self._then(Query("ERROR" + (f" {render_literal(message)}" if message is not None else "")))
+
+
+@dataclass(frozen=True, slots=True)
+class _Matched(_WhenActions):
+    """Actions for `WHEN MATCHED` / `WHEN NOT MATCHED BY SOURCE` (the target row exists)."""
 
     def update(self, values: Mapping[str | ColumnRef[Any], Value] | None = None, /, **kwargs: Value) -> Merge:
         """`UPDATE SET col = value, ...`"""
@@ -81,23 +86,10 @@ class _Matched:
     def delete(self) -> Merge:
         return self._then(Query("DELETE"))
 
-    def do_nothing(self) -> Merge:
-        return self._then(Query("DO NOTHING"))
-
-    def error(self, message: str | None = None) -> Merge:
-        """`ERROR ['message']`: abort the MERGE if such a row occurs."""
-        return self._then(_error(message))
-
 
 @dataclass(frozen=True, slots=True)
-class _NotMatched:
+class _NotMatched(_WhenActions):
     """Actions for `WHEN NOT MATCHED [BY TARGET]` (the source row has no target row)."""
-
-    merge: Merge
-    condition: Bool | None
-
-    def _then(self, action: Query) -> Merge:
-        return replace(self.merge, _whens=(*self.merge._whens, When("NOT MATCHED", self.condition, action)))
 
     def insert(
         self,
@@ -109,9 +101,9 @@ class _NotMatched:
             cols = tuple(values.keys())
             vals = tuple(to_expr(v) for v in values.values())
         else:
-            cols = tuple(column_name(c) for c in columns)
+            cols = column_names(columns)
             vals = tuple(to_expr(v) for v in values)
-        head = ("INSERT (" + ", ".join(quote_ident(c) for c in cols) + ") VALUES (") if cols else "INSERT VALUES ("
+        head = f"INSERT {ident_list(cols)} VALUES (" if cols else "INSERT VALUES ("
         return self._then(concat(Query(head), join(", ", vals), ")"))
 
     def insert_all(self) -> Merge:
@@ -122,15 +114,15 @@ class _NotMatched:
         """`INSERT BY NAME`: insert the source row matching columns by name."""
         return self._then(Query("INSERT BY NAME"))
 
-    def do_nothing(self) -> Merge:
-        return self._then(Query("DO NOTHING"))
 
-    def error(self, message: str | None = None) -> Merge:
-        return self._then(_error(message))
+# endregion
+
+
+# region MERGE
 
 
 @dataclass(frozen=True, slots=True, eq=False)
-class Merge(Statement):
+class Merge(DmlStatement):
     """`MERGE INTO target USING source ON cond WHEN ... THEN ...`
 
     ```python
@@ -146,9 +138,6 @@ class Merge(Statement):
     _on: Bool | None = None
     _using_columns: tuple[str, ...] = ()
     _whens: tuple[When, ...] = ()
-    _returning: tuple[Node, ...] = ()
-    _ctes: tuple[CTE, ...] = ()
-    _db: Database | None = None
 
     def using(
         self,
@@ -168,18 +157,11 @@ class Merge(Statement):
 
     def when_not_matched(self, condition: Bool | None = None) -> _NotMatched:
         """`WHEN NOT MATCHED [BY TARGET]`: source rows without a target row."""
-        return _NotMatched(self, condition)
+        return _NotMatched(self, "NOT MATCHED", condition)
 
     def when_not_matched_by_source(self, condition: Bool | None = None) -> _Matched:
         """`WHEN NOT MATCHED BY SOURCE`: target rows without a source row."""
         return _Matched(self, "NOT MATCHED BY SOURCE", condition)
-
-    def returning(self, *items: ColumnInput) -> Merge:
-        """`RETURNING ...`; `merge_action` tells which action applied."""
-        return replace(self, _returning=(*self._returning, *to_columns(items)))
-
-    def with_(self, *ctes: CTE) -> Merge:
-        return replace(self, _ctes=(*self._ctes, *ctes))
 
     @override
     def build(self) -> Query:
@@ -187,11 +169,7 @@ class Merge(Statement):
             raise ValueError("MERGE needs .using(source, on=...)")
         if not self._whens:
             raise ValueError("MERGE needs at least one WHEN clause")
-        match = (
-            concat(" ON ", self._on)
-            if self._on is not None
-            else Query(" USING (" + ", ".join(quote_ident(c) for c in self._using_columns) + ")")
-        )
+        match = clause("ON", self._on) if self._on is not None else Query(" USING " + ident_list(self._using_columns))
         return concat(
             with_clause(self._ctes, recursive=False),
             "MERGE INTO ",
@@ -206,3 +184,6 @@ class Merge(Statement):
 
 def merge_into(target: TableLike) -> Merge:
     return Merge(to_table(target))
+
+
+# endregion

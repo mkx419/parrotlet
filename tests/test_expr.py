@@ -6,13 +6,13 @@ from uuid import UUID
 import duckdb
 import pytest
 
+import parrotlet.type as qlt
 from parrotlet import (
     Expr,
     and_,
     case,
     cast,
     col,
-    datatype,
     exists,
     func,
     lit,
@@ -108,9 +108,9 @@ def test_case(con: duckdb.DuckDBPyConnection) -> None:
 
 
 def test_cast(con: duckdb.DuckDBPyConnection) -> None:
-    assert scalar(con, cast("42", datatype.INTEGER)) == 42
+    assert scalar(con, cast("42", qlt.Integer)) == 42
     assert scalar(con, val("x").try_cast("INTEGER")) is None
-    assert scalar(con, cast("1.5", datatype.DECIMAL(4, 2))) == Decimal("1.50")
+    assert scalar(con, cast("1.5", qlt.Decimal(4, 2))) == Decimal("1.50")
     with pytest.raises(ValueError, match="Invalid type name"):
         cast(1, "INTEGER); DROP TABLE users; --")
 

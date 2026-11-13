@@ -12,8 +12,7 @@ DuckDB 用の、型安全な SQL クエリビルダーです（Python 3.14+）�
 ```python
 import datetime
 from parrotlet import Column, Database, Model, column
-from parrotlet import functions as F
-
+import parrotlet.functions as fn
 db = Database("app.duckdb")
 
 
@@ -22,7 +21,7 @@ class User(Model, table="users"):
     id: Column[int] = column(primary_key=True)
     name: Column[str]
     age: Column[int | None] = column(default=None)
-    joined: Column[datetime.datetime] = column(default=F.now())
+    joined: Column[datetime.datetime] = column(default=fn.now())
 
 
 db.insert(User).values(User(id=1, name="alice", age=30), User(id=2, name="bob")).execute()
@@ -30,16 +29,22 @@ db.insert(User).values(User(id=1, name="alice", age=30), User(id=2, name="bob"))
 with db.appender(User) as app:  # 大量の行は appender で高速に投入
     app.extend(User(id=i, name=f"user{i}") for i in range(3, 10_000))
 
-db.select(User.name, F.upper(User.name)).from_(User).where(User.age >= 20).fetchall()
-db.from_(User).where(User.name.like("a%")).fetch(User)  # list[User]
+db.select(User.name, fn.upper(User.name)).from_(User).where(User.age >= 20).fetchall()
+db.from_(User).where(User.name.like("a%")).fetch_as(User)  # list[User]
 
 User.name > 3  # 型エラー：VARCHAR と数値は比較できない
-F.upper(User.age)  # 型エラー：upper は VARCHAR を取る
+fn.upper(User.age)  # 型エラー：upper は VARCHAR を取る
 ```
 
 ## ドキュメント
 
-使い方ガイドと API リファレンスは [Zensical](https://zensical.org/)（mkdocstrings で API リファレンスを生成）でビルドします。設定は `zensical.toml` です。
+| 内容 | 場所 |
+|---|---|
+| 使い方（はじめに、モデル、式、SELECT、DML、DDL、関数、DuckDB 固有の機能など） | [`docs/guide/`](docs/guide/getting-started.md) |
+| 内部設計・動作原理（SQL の組み立て、型安全の仕組み、モデル、実行、関数の生成） | [`docs/internals/`](docs/internals/index.md) |
+| API リファレンス（docstring から生成） | [`docs/reference/`](docs/reference/index.md) |
+
+使い方ガイド・内部設計・API リファレンスは [Zensical](https://zensical.org/)（mkdocstrings で API リファレンスを生成）でビルドします。設定は `zensical.toml` です。
 
 ```bash
 uv run --group docs zensical serve
@@ -57,6 +62,10 @@ uvx ruff check src tests scripts
 
 ```bash
 uvx pyright src tests scripts
+```
+
+```bash
+uvx ty check src tests scripts
 ```
 
 関数モジュール（`src/parrotlet/functions/_core.py` など）は、DuckDB の関数カタログから生成しています。DuckDB を更新したら再生成してください。
